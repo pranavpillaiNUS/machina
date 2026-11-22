@@ -11,10 +11,13 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from .corpus import filesystem_path, scan
 from .discovery import classify_suffix
+from .dxf import dxf_encoding, header_values, read_records
 from .formats import _step_decode
+from .oda import DWG_VERSIONS, convert, converter_command, dwg_version
 
 
 STEP_HEADER_BYTES = 64 * 1024
@@ -76,15 +79,26 @@ def discover_candidates(input_root: Path, private_output: Path) -> dict[str, obj
     inspected: Counter[str] = Counter()
     skipped: Counter[str] = Counter()
     pdf_module = _pdf_module()
+    converter = converter_command()
     messages = _quiet_pdf_messages(pdf_module) if pdf_module else nullcontext()
 
     with messages:
         for entry in scan(root):
             suffix = entry.relative.suffix.lower()
-            if suffix not in _STEP_SUFFIXES and suffix != ".pdf":
+            if suffix not in _STEP_SUFFIXES and suffix not in {".pdf", ".dxf", ".dwg"}:
                 continue
             source = root.joinpath(*entry.relative.parts)
-            if suffix in _STEP_SUFFIXES:
+            if suffix in {".dxf", ".dwg"}:
+                if suffix == ".dwg" and converter is None:
+                    skipped["dwg_converter_unavailable"] += 1
+                    continue
+                try:
+                    metadata = _cad_metadata(source, suffix == ".dwg")
+                except (OSError, ValueError):
+                    skipped[suffix[1:] + "_header_unavailable"] += 1
+                    continue
+                inspected[suffix[1:]] += 1
+            elif suffix in _STEP_SUFFIXES:
                 try:
                     metadata = _step_metadata(source)
                 except (OSError, _HeaderError):
@@ -241,6 +255,29 @@ def _pdf_metadata(source: Path, module) -> list[tuple[str, str, str]]:
     finally:
         # MuPDF retains diagnostics even with output disabled. Keep bulk scans bounded.
         module.TOOLS.reset_mupdf_warnings()
+
+
+_CAD_FIELDS = {
+    "$AUTHOR": "author", "$LASTSAVEDBY": "author", "$TITLE": "title",
+    "$PROJECTNAME": "project", "$CUSTOMPROPERTY": "custom",
+}
+
+
+def _cad_metadata(source: Path, dwg: bool) -> list[tuple[str, str, str]]:
+    if dwg:
+        version = dwg_version(source)
+        with TemporaryDirectory(prefix="machina-candidates-") as folder:
+            data = convert(source, Path(folder), DWG_VERSIONS[version], "DXF").read_bytes()
+    else:
+        data = source.read_bytes()
+    records = read_records(data)
+    encoding = dxf_encoding(records)
+    metadata = []
+    for name, value in header_values(records):
+        # ODA stamps its own account into $LASTSAVEDBY on export, so a DWG's value is not evidence.
+        if name in _CAD_FIELDS and not (dwg and name == "$LASTSAVEDBY"):
+            metadata.append((_CAD_FIELDS[name], "dxf." + name, value.decode(encoding, errors="replace")))
+    return metadata
 
 
 def _add_evidence(evidence: dict[tuple[str, str], _Evidence], metadata: Iterable[tuple[str, str, str]]) -> None:
