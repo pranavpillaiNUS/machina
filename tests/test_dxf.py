@@ -52,5 +52,28 @@ class DxfTests(unittest.TestCase):
         self.assertIn(b"  8\nACME", out)
 
 
+    def mtext_values(self, data):
+        return [record for record in read_records(data) if record[0] in (1, 3)]
+
+    def test_mtext_identity_split_across_chunks_is_replaced(self):
+        data = b"  0\nMTEXT\n  3\n" + b"x" * 246 + b"AC\n  1\nME tail\n  0\nEOF\n"
+        out = rewrite_dxf_bytes(data, swap)
+        self.assertEqual(b"".join(value for _, value in self.mtext_values(out)), b"x" * 246 + b"NOVA tail")
+
+    def test_mtext_growth_adds_chunks_within_250_bytes(self):
+        accent = "\N{LATIN SMALL LETTER E WITH ACUTE}" * 300
+        data = b"  0\nMTEXT\n  1\nACME\n  0\nEOF\n"
+        out = rewrite_dxf_bytes(data, lambda value: value.replace("ACME", accent))
+        records = self.mtext_values(out)
+        self.assertEqual([code for code, _ in records], [3, 1])  # 300 one-byte cp1252 chars -> 250 + 50
+        self.assertTrue(all(len(value) <= 250 for _, value in records))
+        self.assertEqual(b"".join(value for _, value in records).decode("cp1252"), accent)
+
+    def test_mtext_shrink_drops_chunks(self):
+        data = b"  0\nMTEXT\n  3\n" + b"A" * 250 + b"\n  1\ntail\n  0\nEOF\n"
+        out = rewrite_dxf_bytes(data, lambda value: value.replace("A" * 250, "B"))
+        self.assertEqual(out, b"  0\nMTEXT\n  1\nBtail\n  0\nEOF\n")
+
+
 if __name__ == "__main__":
     unittest.main()

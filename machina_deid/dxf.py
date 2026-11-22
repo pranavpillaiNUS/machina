@@ -124,6 +124,9 @@ def rewrite_dxf_bytes(data: bytes, replace: Replacement, *, strip_thumbnail: boo
         line = index * 2 + 1
         lines[line] = (value, lines[line][1])
 
+    rebuilt: dict[int, list[tuple[bytes, bytes]]] = {}
+    dropped: set[int] = set()
+
     def rewrite_mtext(indices: list[int]) -> None:
         if not indices:
             return
@@ -132,20 +135,20 @@ def rewrite_dxf_bytes(data: bytes, replace: Replacement, *, strip_thumbnail: boo
         after = _dxf_mtext(before, replace)
         if before == after:
             return
-        payload = after.encode(encoding, errors="surrogateescape")
-        # Group 3 chunks precede a final group 1. Keep existing group structure.
-        limit = 250 * len(indices)
-        if len(payload) > limit:
-            raise ValueError("DXF MTEXT replacement exceeds the existing chunk capacity")
-        # Preserve all preceding group 3 chunks at their original byte widths.
-        for index, old in zip(indices[:-1], values[:-1]):
-            if len(payload) <= len(old):
-                raise ValueError("DXF MTEXT replacement does not fit the existing chunk structure")
-            chunk, payload = payload[:len(old)], payload[len(old):]
-            write_value(index, chunk)
-        if len(payload) > 250:
-            raise ValueError("DXF MTEXT final group would exceed 250 bytes")
-        write_value(indices[-1], payload)
+        chunks = _chunks(after, encoding)
+        if any(b"\n" in chunk or b"\r" in chunk or b"\x00" in chunk for chunk in chunks):
+            raise ValueError("Replacement contains an invalid DXF line character")
+        first, last = indices[0], indices[-1]
+        code_ending = lines[first * 2][1]
+        value_ending = lines[first * 2 + 1][1]
+        final_code = lines[last * 2][0] if records[last][0] == 1 else lines[last * 2][0].replace(b"3", b"1", 1)
+        chunk_code = lines[first * 2][0] if records[first][0] == 3 else final_code.replace(b"1", b"3", 1)
+        pairs = []
+        for position, chunk in enumerate(chunks, 1):
+            code_line = final_code if position == len(chunks) else chunk_code
+            pairs.extend([(code_line, code_ending), (chunk, value_ending)])
+        rebuilt[first] = pairs
+        dropped.update(indices[1:])
 
     record_type = b""
     section = None
@@ -171,4 +174,39 @@ def rewrite_dxf_bytes(data: bytes, replace: Replacement, *, strip_thumbnail: boo
                 if code == 1000 and len(updated) > 255:
                     raise ValueError("DXF extended data replacement exceeds 255 bytes")
                 write_value(index, updated)
-    return b"".join(value + ending for value, ending in lines)
+    rewrite_mtext(mtext_indices)
+    output = []
+    for index in range(len(records)):
+        if index in rebuilt:
+            output.extend(rebuilt[index])
+        elif index not in dropped:
+            output.extend(lines[index * 2:index * 2 + 2])
+    return b"".join(value + ending for value, ending in output)
+
+
+def _chunks(text: str, encoding: str, limit: int = 250) -> list[bytes]:
+    """Split encoded MTEXT into groups of at most limit bytes.
+
+    Boundaries fall on character boundaries and avoid whitespace at either edge of
+    a group, because DXF readers commonly strip group values.
+    """
+    encoded = [character.encode(encoding, errors="surrogateescape") for character in text]
+    chunks = []
+    start = 0
+    while True:
+        end, size = start, 0
+        while end < len(encoded) and size + len(encoded[end]) <= limit:
+            size += len(encoded[end])
+            end += 1
+        if end == start and end < len(encoded):
+            raise ValueError("DXF MTEXT character exceeds the group size limit")
+        if end < len(encoded):
+            split = end
+            while split > start + 1 and (text[split].isspace() or text[split - 1].isspace()):
+                split -= 1
+            if split > start + 1:
+                end = split
+        chunks.append(b"".join(encoded[start:end]))
+        if end >= len(encoded):
+            return chunks
+        start = end
