@@ -25,6 +25,9 @@ def main(source_dir, target_dir, version, kind, _recurse, _audit, _pattern="*.*"
             payload = data.split(b"\n", 1)[1]
         else:
             payload = CODES[version].encode("ascii") + b"\n" + data
+        if os.environ.get("FAKE_ODA_MUTATE") and kind == "DWG" and b"NOVA" in payload:
+            # Imitate a round trip that loses data only when edited content is written.
+            payload = payload.replace(b" 10\n1.0\n", b" 10\n999.0\n")
         if os.environ.get("FAKE_ODA_STAMP"):
             # Imitate ODA: every write records the passwd login as $LASTSAVEDBY.
             login = pwd.getpwuid(os.getuid()).pw_name.encode()

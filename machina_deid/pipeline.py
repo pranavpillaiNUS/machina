@@ -196,7 +196,7 @@ def rewrite_corpus(
     if output_root.exists():
         raise ValueError("Output already exists. Choose a new output directory.")
     if options.edit_dwg and converter_command() is None:
-        raise ValueError("DWG editing needs ODA File Converter")
+        raise ValueError("DWG editing needs ODA File Converter with a hidden display")
 
     input_root = filesystem_path(input_root)
     output_root = filesystem_path(output_root)

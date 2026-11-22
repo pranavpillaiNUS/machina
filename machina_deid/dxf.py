@@ -58,6 +58,11 @@ def dxf_encoding(records: list[DxfRecord]) -> str:
     return encoding
 
 
+def _mtext_run(record_type: bytes, embedded: bool, code: int) -> bool:
+    """True for text groups joined as one MTEXT value, including multiline attributes."""
+    return code in {1, 3} and (record_type == b"MTEXT" or (embedded and record_type in {b"ATTRIB", b"ATTDEF"}))
+
+
 def editable(record_type: bytes, code: int, header_name: bytes | None) -> bool:
     """Return True for the only fields the rewriter may change."""
     if header_name is not None:
@@ -137,17 +142,21 @@ def _normalized(records: list[DxfRecord]) -> list[tuple[int, bytes, bool]]:
     result: list[tuple[int, bytes, bool]] = []
     record_type = b""
     section = header_name = None
+    embedded = False
     mtext: list[bytes] | None = None
     for index, (code, value) in enumerate(records):
         if index in skipped:
             continue
-        in_mtext = record_type == b"MTEXT" and code in {1, 3}
+        in_mtext = _mtext_run(record_type, embedded, code)
         if mtext is not None and not in_mtext:
             result.append((1, b"".join(mtext), True))
             mtext = None
         if code == 0:
             record_type = value
             section = header_name = None
+            embedded = False
+        elif code == 101 and value == b"Embedded Object":
+            embedded = True
         elif code == 2 and record_type == b"SECTION" and section is None:
             section = value
         elif code == 9 and section == b"HEADER":
@@ -169,14 +178,24 @@ def check_invariants(before: list[DxfRecord], after: list[DxfRecord]) -> None:
             raise ValueError("DXF edit changed a protected field")
 
 
-def drawing_shape(records: list[DxfRecord]) -> tuple[Counter, dict[bytes, bytes]]:
-    """Object types (CLASS excluded) and the handle-to-type map of drawing sections.
+_POINTER_CODES = frozenset({330, 340, 350, 360})
+_GUID = re.compile(rb"\{[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}")
+_FLOAT_CODES = frozenset({*range(10, 60), *range(110, 150), *range(210, 240), *range(1010, 1060)})
 
-    ODA re-handles some OBJECTS-section dictionaries and XRECORDs on every write, so
-    only ENTITIES, BLOCKS and TABLES handles are expected to survive a round trip.
+
+def drawing_shape(records: list[DxfRecord]) -> tuple[Counter, dict[bytes, bytes], list[tuple[int, object]]]:
+    """Summarize what a DWG round trip must preserve.
+
+    Returns object types (CLASS excluded), the handle-to-type map, and the record stream
+    of the ENTITIES, BLOCKS and TABLES sections, with numbers rounded to 1e-9. ODA
+    re-handles some OBJECTS-section dictionaries and XRECORDs on every write, so pointer
+    codes (330/340/350/360), which may target them, are left out of the stream. GUID
+    values (for example the 3DSOLID modeler GUID in code 2) are regenerated on every
+    write and are left out too.
     """
     types = Counter(value for code, value in records if code == 0 and value != b"CLASS")
     handles: dict[bytes, bytes] = {}
+    stream: list[tuple[int, object]] = []
     section, record_type = None, b""
     for code, value in records:
         if code == 0:
@@ -185,9 +204,17 @@ def drawing_shape(records: list[DxfRecord]) -> tuple[Counter, dict[bytes, bytes]
                 section = None
         elif code == 2 and record_type == b"SECTION" and section is None:
             section = value
-        elif code in (5, 105) and section in (b"ENTITIES", b"BLOCKS", b"TABLES"):
-            handles[value] = record_type
-    return types, handles
+        if section in (b"ENTITIES", b"BLOCKS", b"TABLES") and code not in _POINTER_CODES and not _GUID.fullmatch(value):
+            if code in (5, 105):
+                handles[value] = record_type
+            if code in _FLOAT_CODES:
+                try:
+                    stream.append((code, round(float(value), 9)))
+                    continue
+                except ValueError:
+                    pass
+            stream.append((code, value))
+    return types, handles, stream
 
 
 def rewrite_dxf_bytes(data: bytes, replace: Replacement, *, strip_thumbnail: bool = True) -> bytes:
@@ -229,18 +256,23 @@ def rewrite_dxf_bytes(data: bytes, replace: Replacement, *, strip_thumbnail: boo
     record_type = b""
     section = None
     header_name = None
+    embedded = False
     mtext_indices = []
     for index, (code, value) in enumerate(records):
-        if code == 0:
+        if mtext_indices and not _mtext_run(record_type, embedded, code):
             rewrite_mtext(mtext_indices)
             mtext_indices = []
+        if code == 0:
             record_type = value
             section = header_name = None
+            embedded = False
+        elif code == 101 and value == b"Embedded Object":
+            embedded = True
         elif code == 2 and record_type == b"SECTION" and section is None:
             section = value
         elif code == 9 and section == b"HEADER":
             header_name = value
-        elif record_type == b"MTEXT" and code in {1, 3}:
+        elif _mtext_run(record_type, embedded, code):
             mtext_indices.append(index)
         elif editable(record_type, code, header_name):
             before = lines[index * 2 + 1][0].decode(encoding, errors="surrogateescape")

@@ -34,16 +34,31 @@ def dwg_version(path: Path) -> str:
 
 
 def converter_command() -> list[str] | None:
-    """Locate the converter. An explicit override is used verbatim."""
+    """Locate the converter, or None when it cannot run without a visible window.
+
+    An explicit override is used verbatim. The converter on PATH runs only on a
+    hidden display: MACHINA_ODA_DISPLAY, else xvfb-run. A desktop DISPLAY is never used.
+    """
     override = os.environ.get("MACHINA_ODA_CONVERTER")
     if override:
         return shlex.split(override)
     found = shutil.which("ODAFileConverter")
     if found is None:
         return None
-    if sys.platform.startswith("linux") and not os.environ.get("DISPLAY") and shutil.which("xvfb-run"):
+    if os.environ.get("MACHINA_ODA_DISPLAY") or not sys.platform.startswith("linux"):
+        return [found]
+    if shutil.which("xvfb-run"):
         return ["xvfb-run", "-a", found]
-    return [found]
+    return None
+
+
+def _child_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    hidden = environment.get("MACHINA_ODA_DISPLAY")
+    if hidden:
+        environment["DISPLAY"] = hidden
+        environment.pop("WAYLAND_DISPLAY", None)
+    return environment
 
 
 def convert(
@@ -57,7 +72,7 @@ def convert(
     """Convert one file and return the single non-empty output inside output_dir."""
     command = converter_command()
     if command is None:
-        raise ValueError("DWG editing needs ODA File Converter")
+        raise ValueError("DWG editing needs ODA File Converter with a hidden display")
     if version not in DWG_VERSIONS.values() or kind not in ("DWG", "DXF"):
         raise ValueError("Unsupported conversion target")
     target = Path(tempfile.mkdtemp(prefix="oda-out-", dir=output_dir))
@@ -69,6 +84,7 @@ def convert(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            env=_child_environment(),
         )
         try:
             returncode = process.wait(timeout=timeout)

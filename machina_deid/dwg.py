@@ -22,21 +22,25 @@ def rewrite_dwg(source: Path, destination: Path, replace: Replacement) -> bool:
     """
     version = dwg_version(source)
     if converter_command() is None:
-        raise ValueError("DWG editing needs ODA File Converter")
+        raise ValueError("DWG editing needs ODA File Converter with a hidden display")
     target = DWG_VERSIONS[version]
     with TemporaryDirectory(prefix="machina-dwg-") as folder:
         work = Path(folder)
-        original = convert(source, work, target, "DXF").read_bytes()
-        edited_bytes = rewrite_dxf_bytes(original, replace)
+        original_path = convert(source, work, target, "DXF")
+        original = original_path.read_bytes()
+        # ODA normalizes on every write: it renumbers anonymous blocks, drops default
+        # values and re-encodes proxy graphics. An unedited round trip is the baseline,
+        # so the edited round trip may differ from it only by the edits themselves.
+        baseline = convert(convert(original_path, work, target, "DWG"), work, target, "DXF").read_bytes()
         edited = work / "edited.dxf"
-        edited.write_bytes(edited_bytes)
+        edited.write_bytes(rewrite_dxf_bytes(original, replace))
         output = convert(edited, work, target, "DWG")
         if dwg_version(output) != version:
             raise ValueError("DWG conversion changed the file version")
         check = convert(output, work, target, "DXF").read_bytes()
         check_records = read_records(check)
-        # Compare with what was written: the edit may legitimately drop the thumbnail section.
-        if drawing_shape(check_records) != drawing_shape(read_records(edited_bytes)):
+        expected = read_records(rewrite_dxf_bytes(baseline, replace))
+        if drawing_shape(check_records) != drawing_shape(expected):
             raise ValueError("DWG round trip changed drawing structure")
         if rewrite_dxf_bytes(check, replace, strip_thumbnail=False) != check:
             raise ValueError("DWG still contains replaceable text")

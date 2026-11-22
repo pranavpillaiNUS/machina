@@ -48,7 +48,7 @@ def probe_dwg(index: int, source: Path) -> dict:
             row["seconds_per_conversion"] = round((time.monotonic() - started) / 3, 2)
             row["version_kept"] = dwg_version(dwg_b) == version
             row["size_ratio"] = round(dwg_b.stat().st_size / source.stat().st_size, 3)
-            (types_a, handles_a), (types_b, handles_b) = _shape(a), _shape(b)
+            (types_a, handles_a, _), (types_b, handles_b, _) = _shape(a), _shape(b)
             row["types_equal"] = types_a == types_b
             row["handles_equal"] = handles_a == handles_b
             row["thumbnail_a"] = _has_thumbnail(a)

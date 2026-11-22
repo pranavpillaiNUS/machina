@@ -94,5 +94,16 @@ class DxfTests(unittest.TestCase):
         check_invariants(before, [(0, b"MTEXT"), (1, b"XYZ"), (0, b"EOF")])
 
 
+    def test_multiline_attribute_identity_split_across_chunks_is_replaced(self):
+        data = (
+            b"  0\nATTRIB\n  5\n30\n  1\nshort\n  2\nCLIENT\n101\nEmbedded Object\n"
+            b"  3\n" + b"y" * 10 + b"AC\n  1\nME end\n  0\nEOF\n"
+        )
+        out = rewrite_dxf_bytes(data, swap)
+        joined = b"".join(value for code, value in read_records(out)[5:] if code in (1, 3))
+        self.assertEqual(joined, b"y" * 10 + b"NOVA end")
+        self.assertIn(b"  2\nCLIENT", out)
+
+
 if __name__ == "__main__":
     unittest.main()

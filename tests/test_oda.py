@@ -38,6 +38,30 @@ class OdaTests(unittest.TestCase):
         with fake_environment():
             self.assertEqual(converter_command(), [sys.executable, str(FAKE)])
 
+    def stub_on_path(self):
+        bin_dir = self.folder / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "ODAFileConverter"
+        stub.write_text("#!/bin/sh\nprintf '%s|%s' \"$DISPLAY\" \"$WAYLAND_DISPLAY\" > \"$2/drawing.dxf\"\n")
+        stub.chmod(0o755)
+        return str(bin_dir)
+
+    def test_path_binary_with_only_a_visible_display_is_refused(self):
+        environment = {"MACHINA_ODA_CONVERTER": "", "MACHINA_ODA_DISPLAY": "", "PATH": self.stub_on_path(), "DISPLAY": ":0"}
+        with mock.patch.dict(os.environ, environment):
+            self.assertIsNone(converter_command())
+            with self.assertRaisesRegex(ValueError, "hidden display"):
+                convert(self.drawing(), self.folder, "ACAD2018", "DXF")
+
+    def test_hidden_display_reaches_the_converter(self):
+        environment = {
+            "MACHINA_ODA_CONVERTER": "", "MACHINA_ODA_DISPLAY": ":97", "PATH": self.stub_on_path(),
+            "DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0",
+        }
+        with mock.patch.dict(os.environ, environment):
+            output = convert(self.drawing(), self.folder, "ACAD2018", "DXF")
+        self.assertEqual(output.read_text(), ":97|")
+
     def test_convert_round_trip_with_fake(self):
         out = self.folder / "out"
         out.mkdir()

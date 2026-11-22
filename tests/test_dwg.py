@@ -17,7 +17,7 @@ def drawing_dxf(text=b"ACME", xref=b"site.dwg"):
         b"  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1027\n  9\n$LASTSAVEDBY\n  1\nmachina\n"
         b"  0\nENDSEC\n  0\nSECTION\n  2\nBLOCKS\n  0\nBLOCK\n  5\n20\n  2\nSITE\n  1\n" + xref +
         b"\n  0\nENDBLK\n  5\n21\n  0\nENDSEC\n  0\nSECTION\n  2\nENTITIES\n"
-        b"  0\nTEXT\n  5\n2A\n  8\n0\n  1\n" + text + b"\n  0\nENDSEC\n  0\nEOF\n"
+        b"  0\nTEXT\n  5\n2A\n  8\n0\n 10\n1.0\n  1\n" + text + b"\n  0\nENDSEC\n  0\nEOF\n"
     )
 
 
@@ -64,6 +64,11 @@ class DwgTests(unittest.TestCase):
         changed, destination = self.run_adapter(data)
         self.assertTrue(changed)
         self.assertNotIn(b"THUMBNAILIMAGE", destination.read_bytes())
+
+    def test_changed_geometry_is_rejected(self):
+        with mock.patch.dict(os.environ, {"FAKE_ODA_MUTATE": "1"}):
+            with self.assertRaisesRegex(ValueError, "changed drawing structure"):
+                self.run_adapter(fake_dwg())
 
     def test_unknown_version_raises(self):
         with self.assertRaisesRegex(ValueError, "Unsupported DWG version"):
