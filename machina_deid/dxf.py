@@ -114,6 +114,60 @@ def header_values(records: list[DxfRecord]) -> list[tuple[str, bytes]]:
     return values
 
 
+def _thumbnail_indices(records: list[DxfRecord]) -> set[int]:
+    """Return record indices of every THUMBNAILIMAGE section, ENDSEC included."""
+    indices: set[int] = set()
+    start = None
+    for index, record in enumerate(records):
+        if start is None:
+            if record == (0, b"SECTION") and records[index + 1:index + 2] == [(2, b"THUMBNAILIMAGE")]:
+                start = index
+        elif record == (0, b"ENDSEC"):
+            indices.update(range(start, index + 1))
+            start = None
+    if start is not None:
+        raise ValueError("DXF thumbnail section is not terminated")
+    return indices
+
+
+def _normalized(records: list[DxfRecord]) -> list[tuple[int, bytes, bool]]:
+    """Drop thumbnails, join MTEXT text groups, and mark each record's editability."""
+    skipped = _thumbnail_indices(records)
+    result: list[tuple[int, bytes, bool]] = []
+    record_type = b""
+    section = header_name = None
+    mtext: list[bytes] | None = None
+    for index, (code, value) in enumerate(records):
+        if index in skipped:
+            continue
+        in_mtext = record_type == b"MTEXT" and code in {1, 3}
+        if mtext is not None and not in_mtext:
+            result.append((1, b"".join(mtext), True))
+            mtext = None
+        if code == 0:
+            record_type = value
+            section = header_name = None
+        elif code == 2 and record_type == b"SECTION" and section is None:
+            section = value
+        elif code == 9 and section == b"HEADER":
+            header_name = value
+        if in_mtext:
+            mtext = (mtext or []) + [value]
+            continue
+        result.append((code, value, code != 0 and editable(record_type, code, header_name)))
+    return result
+
+
+def check_invariants(before: list[DxfRecord], after: list[DxfRecord]) -> None:
+    """Raise unless after differs from before only in editable string fields."""
+    old, new = _normalized(before), _normalized(after)
+    if len(old) != len(new):
+        raise ValueError("DXF edit changed a protected field")
+    for (old_code, old_value, may_change), (new_code, new_value, _) in zip(old, new):
+        if old_code != new_code or (old_value != new_value and not may_change):
+            raise ValueError("DXF edit changed a protected field")
+
+
 def rewrite_dxf_bytes(data: bytes, replace: Replacement, *, strip_thumbnail: bool = True) -> bytes:
     lines, records = _parse(data)
     encoding = dxf_encoding(records)
@@ -125,7 +179,7 @@ def rewrite_dxf_bytes(data: bytes, replace: Replacement, *, strip_thumbnail: boo
         lines[line] = (value, lines[line][1])
 
     rebuilt: dict[int, list[tuple[bytes, bytes]]] = {}
-    dropped: set[int] = set()
+    dropped: set[int] = _thumbnail_indices(records) if strip_thumbnail else set()
 
     def rewrite_mtext(indices: list[int]) -> None:
         if not indices:
@@ -181,7 +235,10 @@ def rewrite_dxf_bytes(data: bytes, replace: Replacement, *, strip_thumbnail: boo
             output.extend(rebuilt[index])
         elif index not in dropped:
             output.extend(lines[index * 2:index * 2 + 2])
-    return b"".join(value + ending for value, ending in output)
+    result = b"".join(value + ending for value, ending in output)
+    if result != data:
+        check_invariants(records, read_records(result))
+    return result
 
 
 def _chunks(text: str, encoding: str, limit: int = 250) -> list[bytes]:

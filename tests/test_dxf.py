@@ -1,6 +1,6 @@
 import unittest
 
-from machina_deid.dxf import dxf_encoding, header_values, read_records, rewrite_dxf_bytes
+from machina_deid.dxf import check_invariants, dxf_encoding, header_values, read_records, rewrite_dxf_bytes
 
 
 def swap(value):
@@ -73,6 +73,25 @@ class DxfTests(unittest.TestCase):
         data = b"  0\nMTEXT\n  3\n" + b"A" * 250 + b"\n  1\ntail\n  0\nEOF\n"
         out = rewrite_dxf_bytes(data, lambda value: value.replace("A" * 250, "B"))
         self.assertEqual(out, b"  0\nMTEXT\n  1\nBtail\n  0\nEOF\n")
+
+
+    def test_thumbnail_section_is_removed(self):
+        data = b"  0\nSECTION\n  2\nTHUMBNAILIMAGE\n 90\n2\n310\nFFFF\n  0\nENDSEC\n  0\nEOF\n"
+        self.assertEqual(rewrite_dxf_bytes(data, str), b"  0\nEOF\n")
+        self.assertEqual(rewrite_dxf_bytes(data, str, strip_thumbnail=False), data)
+
+    def test_invariants_reject_protected_change(self):
+        before = [(0, b"TEXT"), (5, b"1F"), (1, b"ACME"), (0, b"EOF")]
+        check_invariants(before, [(0, b"TEXT"), (5, b"1F"), (1, b"NOVA"), (0, b"EOF")])
+        with self.assertRaisesRegex(ValueError, "protected field"):
+            check_invariants(before, [(0, b"TEXT"), (5, b"20"), (1, b"NOVA"), (0, b"EOF")])
+
+    def test_invariants_accept_rechunked_mtext_and_removed_thumbnail(self):
+        before = read_records(
+            b"  0\nSECTION\n  2\nTHUMBNAILIMAGE\n 90\n2\n310\nFFFF\n  0\nENDSEC\n"
+            b"  0\nMTEXT\n  3\nAB\n  1\nCD\n  0\nEOF\n"
+        )
+        check_invariants(before, [(0, b"MTEXT"), (1, b"XYZ"), (0, b"EOF")])
 
 
 if __name__ == "__main__":
