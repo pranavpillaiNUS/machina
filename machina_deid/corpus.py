@@ -12,6 +12,18 @@ class CorpusFile:
     size: int
 
 
+def filesystem_path(path: Path) -> Path:
+    """Use Windows extended-length spelling for an absolute filesystem path."""
+    if os.name != "nt":
+        return path
+    value = str(path.absolute())
+    if value.startswith("\\\\?\\"):
+        return Path(value)
+    if value.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + value[2:])
+    return Path("\\\\?\\" + value)
+
+
 def scan(root: Path) -> list[CorpusFile]:
     """Find source files in deterministic order and exclude downloader state."""
     if not root.is_dir():

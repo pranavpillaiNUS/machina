@@ -36,7 +36,36 @@ Keep the raw corpus, original identifiers, private rules, access tokens, and run
 4. Rewrite named fields through format-specific adapters. Verify the result by reopening it and checking structural invariants, such as CAD entity IDs and numeric fields, PDF page boxes and rendering, and archive members and checksums. Report every format or file that could not be validated.
 5. Package `corpus/`, `code/`, and `README.txt` through the official track workflow. Use category-level grading results to prioritize changes that can be measured in the next attempt.
 
-The initial CLI provides an inventory. Format adapters and reference validation are separate milestones.
+## Run the pipeline
+
+Install the optional PDF dependency when processing PDFs. The pipeline source is MIT. PyMuPDF has its own AGPL and commercial licensing options. [PyMuPDF licensing](https://pymupdf.io/licensing)
+
+```sh
+python -m pip install -e '.[pdf]'
+python -m machina_deid run input output/dev/corpus --rules private/rules.json
+python -m unittest discover -s tests -v
+```
+
+The rules file stays local. Start with reviewed aliases and explicit replacements.
+
+```json
+{
+  "rules": [
+    {
+      "source": "Example Foundry",
+      "aliases": ["Example Foundry Ltd"],
+      "replacement": "Juniper Works",
+      "ignore_case": true
+    }
+  ]
+}
+```
+
+Rules match whole tokens by default. Set `"match": "literal"` for a reviewed substring and `"scope": "content"` or `"scope": "path"` to limit a rule. Rules without a replacement use `MACHINA_PSEUDONYM_KEY` and an optional `category` to derive a repeatable pseudonym. Keep the key stable and private between runs.
+
+The runner stages a fresh output directory and reports counts by status and extension. It currently edits STEP text fields, label and path fields in ASCII DXF, IGES header metadata, and selectable PDF text and supported metadata. Unsupported, empty, and oversized files are copied and counted. An adapter failure aborts the run by default. Use `--preserve-on-error` on development runs to retain failed inputs for investigation.
+
+Path renaming is opt-in with `--rename-paths`. The runner plans the namespace before writing and updates references recognized by the adapters. Review relative and native CAD references before enabling it on a submission. Scanned PDF text, PDF attachments, native CAD properties, logos, and nested archives are outside this milestone.
 
 ## Research
 
