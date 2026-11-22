@@ -30,5 +30,27 @@ class DxfTests(unittest.TestCase):
         self.assertEqual(dxf_encoding(records), "utf-8")
 
 
+    def test_header_identity_and_custom_properties_rewrite_in_place(self):
+        data = (
+            b"  0\nSECTION\n  2\nHEADER\n  9\n$LASTSAVEDBY\n  1\nACME\n"
+            b"  9\n$CUSTOMPROPERTYTAG\n  1\nClient\n  9\n$CUSTOMPROPERTY\n  1\nACME Ltd\n"
+            b"  9\n$PROJECTNAME\n  1\nACME Tower\n  9\n$HANDSEED\n  5\nACME\n  0\nENDSEC\n  0\nEOF\n"
+        )
+        out = rewrite_dxf_bytes(data, swap)
+        self.assertEqual(out, data.replace(b"1\nACME", b"1\nNOVA"))
+        self.assertIn(b"$HANDSEED\n  5\nACME", out)
+
+    def test_xrecord_field_and_table_strings(self):
+        data = (
+            b"  0\nXRECORD\n  5\n1F\n  1\nACME\n300\nACME\n"
+            b"  0\nFIELD\n  2\n%<\\AcVar Author>%\n  1\nACME\n"
+            b"  0\nACAD_TABLE\n  2\n*T1\n  1\n{\\fArial;ACME}\n  8\nACME\n  0\nEOF\n"
+        )
+        out = rewrite_dxf_bytes(data, swap)
+        self.assertEqual(out.count(b"NOVA"), 4)
+        self.assertIn(b"  5\n1F", out)
+        self.assertIn(b"  8\nACME", out)
+
+
 if __name__ == "__main__":
     unittest.main()

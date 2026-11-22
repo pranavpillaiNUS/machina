@@ -17,7 +17,15 @@ _DXF_VISIBLE_CODES = {
     b"MULTILEADER": {304},
     b"MLEADER": {304},
     b"TOLERANCE": {1},
+    b"ACAD_TABLE": {1, 3},
 }
+_DXF_HEADER_TEXT = frozenset({
+    b"$TITLE", b"$SUBJECT", b"$AUTHOR", b"$KEYWORDS", b"$COMMENTS", b"$LASTSAVEDBY",
+    b"$REVISIONNUMBER", b"$CUSTOMPROPERTYTAG", b"$CUSTOMPROPERTY", b"$PROJECTNAME",
+    b"$HYPERLINKBASE", b"$STYLESHEET", b"$MENU",
+})
+_DXF_OBJECT_TYPES = frozenset({b"XRECORD", b"FIELD", b"DICTIONARYVAR"})
+_DXF_OBJECT_STRING_CODES = frozenset({1, 2, 3, 4, 6, 7, *range(300, 310), *range(430, 440), *range(470, 480)})
 _DXF_PATH_TYPES = {b"BLOCK", b"IMAGEDEF", b"PDFDEFINITION", b"DGNDEFINITION", b"DWFDEFINITION"}
 _DXF_MTEXT_CONTROL = re.compile(r"\\(?:[AaCcFfHhQqSsTtWw][^;]*;|U\+[0-9A-Fa-f]{4}|.)|[{}]")
 
@@ -47,6 +55,18 @@ def dxf_encoding(records: list[DxfRecord]) -> str:
                 except LookupError:
                     pass
     return encoding
+
+
+def editable(record_type: bytes, code: int, header_name: bytes | None) -> bool:
+    """Return True for the only fields the rewriter may change."""
+    if header_name is not None:
+        return code == 1 and header_name in _DXF_HEADER_TEXT
+    return (
+        code in {999, 1000}
+        or code in _DXF_VISIBLE_CODES.get(record_type, ())
+        or (code == 1 and record_type in _DXF_PATH_TYPES)
+        or (code in _DXF_OBJECT_STRING_CODES and record_type in _DXF_OBJECT_TYPES)
+    )
 
 
 def _dxf_mtext(value: str, replace: Replacement) -> str:
@@ -128,17 +148,22 @@ def rewrite_dxf_bytes(data: bytes, replace: Replacement, *, strip_thumbnail: boo
         write_value(indices[-1], payload)
 
     record_type = b""
+    section = None
+    header_name = None
     mtext_indices = []
     for index, (code, value) in enumerate(records):
         if code == 0:
             rewrite_mtext(mtext_indices)
             mtext_indices = []
             record_type = value
+            section = header_name = None
+        elif code == 2 and record_type == b"SECTION" and section is None:
+            section = value
+        elif code == 9 and section == b"HEADER":
+            header_name = value
         elif record_type == b"MTEXT" and code in {1, 3}:
             mtext_indices.append(index)
-        elif code in {999, 1000} or code in _DXF_VISIBLE_CODES.get(record_type, ()) or (
-            code == 1 and record_type in _DXF_PATH_TYPES
-        ):
+        elif editable(record_type, code, header_name):
             before = lines[index * 2 + 1][0].decode(encoding, errors="surrogateescape")
             after = _dxf_mtext(before, replace) if record_type in _DXF_VISIBLE_CODES else replace(before)
             if before != after:
