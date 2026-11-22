@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+build/
+dist/
+
+/.local/
+/input/
+/output/
+/attempt-*/
+/private/
+/.env
+/.env.*
+*.token
