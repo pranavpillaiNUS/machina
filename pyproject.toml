@@ -9,5 +9,8 @@ description = "Format-aware engineering corpus de-identification"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}
 
+[project.optional-dependencies]
+pdf = ["PyMuPDF==1.26.7"]
+
 [tool.setuptools.packages.find]
 include = ["machina_deid*"]

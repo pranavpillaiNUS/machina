@@ -10,6 +10,8 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from .corpus import filesystem_path
+
 KNOWN_SUFFIXES = frozenset(
     """
     .3dm .3ds .3mf .7z .ai .asc .asm .bmp .bz2 .catdrawing .catpart
@@ -67,6 +69,7 @@ class Inventory:
 def inventory_local(root: Path) -> Inventory:
     """Read regular file sizes and skip the mirror's top-level scratch directory."""
     try:
+        root = filesystem_path(root)
         if root.is_symlink() or not root.is_dir():
             raise InventoryError("The inventory root must be a directory.")
         return _summarize(_local_records(root))
@@ -125,7 +128,7 @@ def _manifest_records(lines: Iterable[str]) -> Iterator[tuple[str, int]]:
         yield path, size
 
 
-def _suffix(name: str) -> str:
+def classify_suffix(name: str) -> str:
     lower_name = name.lower()
     for suffix in COMPOUND_SUFFIXES:
         if lower_name.endswith(suffix):
@@ -155,7 +158,7 @@ def _summarize(records: Iterable[tuple[str, int | None]]) -> Inventory:
             duplicate_path_rows += 1
             continue
         paths.add(path)
-        suffix = _suffix(path.rsplit("/", 1)[-1])
+        suffix = classify_suffix(path.rsplit("/", 1)[-1])
         counts[suffix] += 1
         totals[suffix] += size
         empty_files += size == 0
