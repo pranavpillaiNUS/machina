@@ -11,7 +11,7 @@ import shutil
 from tempfile import TemporaryDirectory
 
 from .archives import ArchiveLimits, MemberTransform, archive_suffix, rewrite_archive
-from .corpus import CorpusFile, filesystem_path, scan
+from .corpus import CorpusFile, filesystem_path, is_lfs_pointer, scan
 from .discovery import classify_suffix
 from .dwg import SUPPORTED_SUFFIXES as DWG_SUFFIXES
 from .dwg import rewrite_dwg
@@ -26,6 +26,13 @@ from .native_cfb import CFB_SIGNATURE
 from .native_cfb import SUPPORTED_SUFFIXES as CFB_SUFFIXES
 from .native_cfb import rewrite_native_cfb
 from .policy import PathMap, Rulebook
+from .solidworks import (
+    SUPPORTED_SUFFIXES as SOLIDWORKS_SUFFIXES,
+    SolidWorksUnavailable,
+    SolidWorksUnsupported,
+    is_modern_solidworks,
+    rewrite_solidworks,
+)
 from .svg import SUPPORTED_SUFFIXES as SVG_SUFFIXES
 from .svg import rewrite_svg
 
@@ -49,7 +56,32 @@ def _select_adapter(source: Path, suffix: str, *, edit_dwg: bool):
         with source.open("rb") as stream:
             if stream.read(len(CFB_SIGNATURE)) == CFB_SIGNATURE:
                 return rewrite_native_cfb
+    if suffix in SOLIDWORKS_SUFFIXES and is_modern_solidworks(source):
+        return rewrite_solidworks
     return ADAPTERS.get(suffix)
+
+
+def _apply_adapter(adapter, source: Path, target: Path, replace, options: "RunOptions") -> bool:
+    if source.suffix.casefold() != ".pdf":
+        return adapter(source, target, replace)
+
+    def transform_attachment(name: str, original: Path, replacement: Path) -> bool:
+        suffix = classify_suffix(name)
+        if suffix == ".pdf" or original.stat().st_size > options.max_edit_bytes:
+            return False
+        attached_adapter = _select_adapter(original, suffix, edit_dwg=options.edit_dwg)
+        if attached_adapter is None or is_lfs_pointer(original, original.stat().st_size):
+            return False
+        try:
+            return attached_adapter(original, replacement, replace)
+        except (SolidWorksUnavailable, SolidWorksUnsupported):
+            return False
+        except Exception:
+            if not options.preserve_on_error:
+                raise
+            return False
+
+    return adapter(source, target, replace, attachment_transform=transform_attachment)
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +142,8 @@ def _rewrite_one(
     archive_members: Counter[str] = Counter()
     if file.size == 0:
         status = "empty"
+    elif is_lfs_pointer(source, file.size):
+        status = "source_pointer"
     elif not (adapter or archive):
         status = "unsupported"
     elif file.size > (ArchiveLimits().max_member_bytes if archive else options.max_edit_bytes):
@@ -120,7 +154,9 @@ def _rewrite_one(
             if archive:
                 changed = _rewrite_embedded(source, target, rulebook, options, archive_members)
             else:
-                changed = adapter(source, target, replace)
+                changed = _apply_adapter(adapter, source, target, replace, options)
+        except (SolidWorksUnavailable, SolidWorksUnsupported):
+            status = "unsupported"
         except Exception as error:
             if not options.preserve_on_error:
                 raise ValueError(
@@ -154,12 +190,18 @@ def _rewrite_embedded(
             if size == 0:
                 counts["empty"] += 1
                 return False
+            if is_lfs_pointer(original, size):
+                counts["source_pointer"] += 1
+                return False
             if adapter is None or size > options.max_edit_bytes:
                 counts["unsupported" if adapter is None else "over_limit"] += 1
                 return False
             replace = partial(paths.replace, source_path=PurePosixPath(name))
             try:
-                changed = adapter(original, replacement, replace)
+                changed = _apply_adapter(adapter, original, replacement, replace, options)
+            except (SolidWorksUnavailable, SolidWorksUnsupported):
+                counts["unsupported"] += 1
+                return False
             except Exception:
                 if not options.preserve_on_error:
                     raise

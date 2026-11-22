@@ -47,7 +47,7 @@ python -m machina_deid run input output/dev/corpus --rules private/rules.json
 python -m unittest discover -s tests -v
 ```
 
-Candidate discovery reads bounded STEP headers and supported PDF document information. It writes exact spellings and evidence counts to the private review file and prints only aggregate counts. Review the candidates before adding approved aliases and replacements to the local rules file.
+Candidate discovery reads bounded STEP headers and supported PDF, AutoCAD, and modern SolidWorks metadata. It writes exact spellings and evidence counts to the private review file and prints only aggregate counts. Review the candidates before adding approved aliases and replacements to the local rules file.
 
 ```json
 {
@@ -68,7 +68,13 @@ The runner stages a fresh output directory and reports counts by status and exte
 
 ZIP and TAR processing recursively visits supported member files and reports leaf-file outcomes. It preserves member names, validates paths and limits expanded bytes and nesting, and rejects encrypted members and symbolic links. Supported TAR compression includes gzip, bzip2, and xz. Archive comments and ownership fields remain outside the current adapters.
 
-FreeCAD processing edits selected document metadata, supported external links, and referenced TechDraw SVG content. The native CFB adapter edits eligible OLE SummaryInformation and DocumentSummaryInformation properties in recognized SolidWorks and Inventor containers when replacements fit existing allocations. It leaves geometry and other streams intact. Modern SolidWorks containers need a separate adapter. [FreeCAD format documentation](https://github.com/FreeCAD/FreeCAD-documentation/blob/main/wiki/File_Format_FCStd.md), [Microsoft OLE property set specification](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-oleps/)
+Some archive members contain Git LFS pointers in place of the CAD data. The runner preserves those bytes and counts them as `source_pointer`. [Git LFS pointer specification](https://github.com/git-lfs/git-lfs/blob/main/docs/spec.md)
+
+FreeCAD processing edits selected document metadata, supported external links, and referenced TechDraw SVG content. The native CFB adapter edits eligible OLE SummaryInformation and DocumentSummaryInformation properties in recognized SolidWorks and Inventor containers when replacements fit existing allocations. It leaves geometry and other streams intact. [FreeCAD format documentation](https://github.com/FreeCAD/FreeCAD-documentation/blob/main/wiki/File_Format_FCStd.md), [Microsoft OLE property set specification](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-oleps/)
+
+Install `.[solidworks]` for typed metadata discovery and bounded metadata edits in modern SolidWorks files. Writes require a version with verified upstream write support. Internal version 12000, used by all 90 locally sampled modern files, is readable and retains its original bytes in production runs. [SWFormat](https://github.com/KenM76/swformat/tree/69b80c860241fdcbfa334f67cb951f76398c1a71)
+
+PDF attachment edits cover eligible descriptions, filenames and supported immediate payloads. GoToE links, portfolios, and other protected relationships may restrict renaming. Nested PDFs and unsupported attachment payloads are preserved.
 
 ### DWG and DXF
 
@@ -89,7 +95,19 @@ python -m machina_deid run input output/dev/corpus --rules private/rules.json --
 
 `docs/autocad-probe.md` records the round-trip measurements behind these choices.
 
-Path renaming is opt-in with `--rename-paths`. The runner plans the namespace before writing and updates references recognized by the adapters. Review relative and native CAD references before enabling it on a submission. Scanned PDF text, PDF attachments, most native CAD metadata, and logos still need coverage.
+Path renaming is opt-in with `--rename-paths`. The runner plans the namespace before writing and updates references recognized by the adapters. Review relative and native CAD references before enabling it on a submission. Scanned PDF text, logos, and native references outside the supported adapters still need coverage.
+
+## Package a local attempt
+
+Run from the committed pipeline revision you want to submit. Save the aggregate report outside the attempt directory.
+
+```sh
+mkdir -p private
+python -m machina_deid run input output/attempt-1/corpus --rules private/rules.json > private/run-report.json
+python -m machina_deid prepare output/attempt-1 --report private/run-report.json --revision HEAD
+```
+
+The packager checks the corpus file count and byte total, copies allowlisted source files from the selected Git revision to `code/`, and writes `README.txt` with the run options and exception counts. Review the finished attempt and follow the official track's upload workflow. [Builders CAD De-ID track](https://www.joinbuilders.org/buildathon/tracks/machina-deid)
 
 ## Research
 

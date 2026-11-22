@@ -2,6 +2,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from machina_deid.formats import rewrite_file
 
@@ -99,6 +100,123 @@ class FormatTests(unittest.TestCase):
             self.assertEqual(next(page.annots()).info["content"], "NOVA note")
             self.assertEqual(rewritten.metadata["author"], "NOVA")
             self.assertIn("NOVA", rewritten.get_xml_metadata())
+
+    @unittest.skipUnless(importlib.util.find_spec("pymupdf"), "Install PyMuPDF for PDF adapter tests")
+    def test_pdf_file_specs_preserve_shared_annotation_links_forms_and_opaque_data(self):
+        import pymupdf
+
+        source = self.folder / "source.pdf"
+        output = self.folder / "output.pdf"
+        with pymupdf.open() as document:
+            page = document.new_page()
+            page.draw_line((50, 60), (150, 60))
+            drawing = page.get_drawings()[0]["items"]
+            widget = pymupdf.Widget()
+            widget.field_name = "Dimension"
+            widget.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
+            widget.field_value = "3.50 mm"
+            widget.rect = pymupdf.Rect(20, 100, 200, 120)
+            page.add_widget(widget)
+
+            file = page.add_file_annot((50, 25), b"authors: ACME", "ACME.txt", desc="ACME drawing note")
+            file_xref = file.xref
+            filespec = document.get_new_xref()
+            document.update_object(filespec, document.xref_get_key(file_xref, "FS")[1])
+            document.xref_set_key(filespec, "AFRelationship", "/Supplement")
+            document.xref_set_key(file_xref, "FS", f"{filespec} 0 R")
+            document.xref_set_key(page.xref, "AF", f"[{filespec} 0 R]")
+            document.xref_set_key(document.pdf_catalog(), "Names", (
+                f"<< /EmbeddedFiles << /Names [(ACME.txt) {filespec} 0 R] >> >>"
+            ))
+            document.embfile_add("opaque.cad", b"opaque data\0", desc="ACME model")
+            document.save(source)
+
+        calls = []
+
+        def transform(name, staged, destination):
+            calls.append(name)
+            if staged.suffix != ".txt":
+                return False
+            self.assertEqual(destination.suffix, ".txt")
+            destination.write_bytes(staged.read_bytes().replace(b"ACME", b"NOVATEK"))
+            return True
+
+        self.assertTrue(rewrite_file(source, output, lambda text: text.replace("ACME", "NOVATEK"),
+                                     attachment_transform=transform))
+        self.assertCountEqual(calls, ["ACME.txt", "opaque.cad"])
+        with pymupdf.open(output) as document:
+            page = document[0]
+            self.assertEqual(page.get_drawings()[0]["items"], drawing)
+            self.assertEqual(next(page.widgets()).field_value, "3.50 mm")
+            attachment = next(page.annots(types=[pymupdf.PDF_ANNOT_FILE_ATTACHMENT]))
+            self.assertEqual(attachment.file_info["filename"], "NOVATEK.txt")
+            self.assertEqual(attachment.file_info["description"], "NOVATEK drawing note")
+            self.assertEqual(attachment.get_file(), b"authors: NOVATEK")
+            self.assertEqual(document.embfile_get("NOVATEK.txt"), b"authors: NOVATEK")
+            self.assertEqual(document.embfile_get("opaque.cad"), b"opaque data\0")
+            self.assertEqual(document.embfile_info("opaque.cad")["description"], "NOVATEK model")
+            specification = document.xref_get_key(attachment.xref, "FS")[1]
+            self.assertIn(specification, document.xref_get_key(page.xref, "AF")[1])
+            self.assertEqual(document.xref_get_key(int(specification.split()[0]), "AFRelationship")[1], "/Supplement")
+
+    @unittest.skipUnless(importlib.util.find_spec("pymupdf"), "Install PyMuPDF for PDF adapter tests")
+    def test_pdf_gotoe_name_resolution_and_oversized_payload_are_preserved(self):
+        import pymupdf
+
+        source = self.folder / "source.pdf"
+        output = self.folder / "output.pdf"
+        payload = b"ACME" * 1024
+        with pymupdf.open() as document:
+            document.new_page()
+            attachment = document.embfile_add("ACME.txt", payload, filename="ACME.txt", desc="ACME note")
+            document.xref_set_key(attachment, "Params/Size", "2")
+            document.xref_set_key(document.pdf_catalog(), "OpenAction", (
+                "<< /S /GoToE /D [0 /Fit] /T << /R /C /N (ACME.txt) >> >>"
+            ))
+            document.save(source)
+
+        def transform(*_args):
+            self.fail("Oversized attachment should stay opaque")
+
+        with patch("machina_deid.formats._PDF_ATTACHMENT_LIMIT", 32):
+            self.assertTrue(rewrite_file(source, output, lambda text: text.replace("ACME", "NOVATEK"),
+                                         attachment_transform=transform))
+        with pymupdf.open(output) as document:
+            self.assertEqual(document.embfile_names(), ["ACME.txt"])
+            self.assertEqual(document.embfile_info("ACME.txt")["filename"], "ACME.txt")
+            self.assertEqual(document.embfile_info("ACME.txt")["description"], "NOVATEK note")
+            self.assertEqual(document.embfile_get("ACME.txt"), payload)
+            self.assertEqual(document.xref_get_key(document.pdf_catalog(), "OpenAction/T/N")[1], "ACME.txt")
+
+    @unittest.skipUnless(importlib.util.find_spec("pymupdf"), "Install PyMuPDF for PDF adapter tests")
+    def test_pdf_multilevel_attachment_name_tree_keeps_limits_and_specs(self):
+        import pymupdf
+
+        source = self.folder / "source.pdf"
+        output = self.folder / "output.pdf"
+        with pymupdf.open() as document:
+            document.new_page()
+            first = document.embfile_add("ACME.txt", b"first")
+            second = document.embfile_add("zz.txt", b"second")
+            leaves = []
+            for name, stream in (("ACME.txt", first), ("zz.txt", second)):
+                leaf = document.get_new_xref()
+                document.update_object(leaf, (
+                    f"<< /Limits [({name}) ({name})] /Names [({name}) "
+                    f"<< /Type /Filespec /F ({name}) /EF << /F {stream} 0 R >> >>] >>"
+                ))
+                leaves.append(leaf)
+            document.xref_set_key(document.pdf_catalog(), "Names/EmbeddedFiles", (
+                f"<< /Kids [{leaves[0]} 0 R {leaves[1]} 0 R] >>"
+            ))
+            document.save(source)
+        self.assertTrue(rewrite_file(source, output, lambda text: text.replace("ACME", "NOVA")))
+        with pymupdf.open(output) as document:
+            kinds = [document.xref_get_key(index, "Limits") for index in range(1, document.xref_length())]
+            self.assertIn(("array", "[(NOVA.txt)(NOVA.txt)]"), kinds)
+            self.assertIn(("array", "[(zz.txt)(zz.txt)]"), kinds)
+            self.assertIn(b"first", [document.xref_stream(index) for index in range(1, document.xref_length())])
+            self.assertIn(b"second", [document.xref_stream(index) for index in range(1, document.xref_length())])
 
 
 if __name__ == "__main__":

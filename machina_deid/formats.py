@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import re
+import tempfile
 import xml.etree.ElementTree as ET
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
+from functools import cmp_to_key
+from pathlib import Path, PurePosixPath
 
 from .dxf import rewrite_dxf_bytes
 from .dxf import split_lines as _split_lines
 
 Replacement = Callable[[str], str]
+AttachmentTransform = Callable[[str, Path, Path], bool]
 SUPPORTED_SUFFIXES = frozenset({".stp", ".step", ".dxf", ".igs", ".iges", ".pdf"})
 
 _STEP_TOKEN = re.compile(
@@ -33,9 +37,16 @@ _PDF_XMP_FIELDS = {
     "Author", "Company", "CreatorTool", "Keywords", "Manager", "Producer", "Title",
     "creator", "description", "publisher", "rights", "subject", "title",
 }
+_PDF_FILE_NAMES = ("UF", "F", "DOS", "Mac", "Unix")
+_PDF_ATTACHMENT_LIMIT = 32 * 1024 * 1024
+_PDF_ATTACHMENT_TOTAL = 128 * 1024 * 1024
+_PDF_ATTACHMENT_GRAPH_LIMIT = 200_000
+_PDF_PROTECTED_ATTACHMENTS = {"EncryptedPayload", "C2PA_Manifest", "FormData", "Schema"}
 
 
-def rewrite_file(source: Path, destination: Path, replace: Replacement) -> bool:
+def rewrite_file(
+    source: Path, destination: Path, replace: Replacement, *, attachment_transform: AttachmentTransform | None = None
+) -> bool:
     """Write an edited file and return True. Leave the destination alone if unchanged.
 
     Callers should provide a staging destination and handle copying on False.
@@ -44,7 +55,7 @@ def rewrite_file(source: Path, destination: Path, replace: Replacement) -> bool:
     """
     suffix = source.suffix.casefold()
     if suffix == ".pdf":
-        return _rewrite_pdf(source, destination, replace)
+        return _rewrite_pdf(source, destination, replace, attachment_transform)
 
     if suffix not in SUPPORTED_SUFFIXES:
         return False
@@ -383,7 +394,279 @@ def _pdf_rewrite_page(pymupdf, page, replace: Replacement) -> bool:
     return True
 
 
-def _rewrite_pdf(source: Path, destination: Path, replace: Replacement) -> bool:
+def _pdf_objects(mupdf, catalog):
+    """Walk reachable dictionaries once without reading PDF content streams."""
+    pending = [catalog]
+    indirect = set()
+    seen = 0
+    while pending:
+        obj = pending.pop()
+        seen += 1
+        if seen > _PDF_ATTACHMENT_GRAPH_LIMIT:
+            raise ValueError("PDF object graph exceeds the attachment scan limit")
+        if mupdf.pdf_is_indirect(obj):
+            xref = mupdf.pdf_to_num(obj)
+            if xref in indirect:
+                continue
+            indirect.add(xref)
+            obj = mupdf.pdf_resolve_indirect_chain(obj)
+        if mupdf.pdf_is_dict(obj):
+            yield obj
+            pending.extend(mupdf.pdf_dict_get_val(obj, index) for index in range(mupdf.pdf_dict_len(obj)))
+        elif mupdf.pdf_is_array(obj):
+            pending.extend(mupdf.pdf_array_get(obj, index) for index in range(mupdf.pdf_array_len(obj)))
+
+
+def _attachment_basename(value: str) -> str:
+    name = PurePosixPath(value.replace("\\", "/")).name
+    if name in {"", ".", ".."} or len(name) > 255 or any(ord(char) < 32 or char in '<>:"/\\|?*' for char in name):
+        return ""
+    return name
+
+
+def _renamed_attachment(value: str, replace: Replacement) -> str:
+    if not value or _attachment_basename(value) != value:
+        return value
+    updated = replace(value)
+    if _attachment_basename(updated) != updated or not updated:
+        return value
+    if PurePosixPath(updated).suffix.casefold() != PurePosixPath(value).suffix.casefold():
+        return value
+    return updated
+
+
+def _pdf_string(mupdf, obj, key: str) -> str:
+    value = mupdf.pdf_dict_gets(obj, key)
+    return mupdf.pdf_to_text_string(value) if mupdf.pdf_is_string(value) else ""
+
+
+def _pdf_rename_attachment_keys(mupdf, tree, replace: Replacement) -> bool:
+    """Plan a name-tree rename and commit only if existing leaf ranges still fit."""
+    plans = []
+    visited = set()
+    renamed = set()
+    changed = False
+
+    def compare(a, b):
+        return mupdf.pdf_objcmp_resolve(a, b)
+
+    def tree_limits(node, depth):
+        nonlocal changed
+        xref = mupdf.pdf_to_num(node)
+        if depth > 40 or (xref and xref in visited) or not mupdf.pdf_is_dict(node):
+            raise ValueError("Unsupported embedded PDF name tree")
+        if xref:
+            visited.add(xref)
+        names = mupdf.pdf_dict_gets(node, "Names")
+        kids = mupdf.pdf_dict_gets(node, "Kids")
+        limits = mupdf.pdf_dict_gets(node, "Limits")
+        entries = None
+        if mupdf.pdf_is_array(names) and mupdf.pdf_is_null(kids):
+            count = mupdf.pdf_array_len(names)
+            if count % 2 or not count:
+                raise ValueError("Invalid embedded PDF name tree entry count")
+            entries = []
+            for index in range(0, count, 2):
+                key = mupdf.pdf_array_get(names, index)
+                if not mupdf.pdf_is_string(key):
+                    raise ValueError("Non-string embedded PDF name tree key")
+                before = mupdf.pdf_to_text_string(key)
+                after = _renamed_attachment(before, replace)
+                if after in renamed:
+                    raise ValueError("Embedded PDF names collide")
+                renamed.add(after)
+                if before != after:
+                    key = mupdf.pdf_new_text_string(after)
+                    changed = True
+                entries.append((key, mupdf.pdf_array_get(names, index + 1)))
+            entries.sort(key=cmp_to_key(lambda a, b: compare(a[0], b[0])))
+            low, high = entries[0][0], entries[-1][0]
+        elif mupdf.pdf_is_array(kids) and mupdf.pdf_is_null(names) and mupdf.pdf_array_len(kids):
+            ranges = [tree_limits(mupdf.pdf_array_get(kids, index), depth + 1) for index in range(mupdf.pdf_array_len(kids))]
+            if any(compare(left[1], right[0]) >= 0 for left, right in zip(ranges, ranges[1:])):
+                raise ValueError("Embedded PDF names would move across name-tree leaves")
+            low, high = ranges[0][0], ranges[-1][1]
+        else:
+            raise ValueError("Unsupported embedded PDF name tree layout")
+        if not mupdf.pdf_is_null(limits) and mupdf.pdf_array_len(limits) != 2:
+            raise ValueError("Invalid embedded PDF name tree limits")
+        plans.append((names, entries, limits, low, high))
+        return low, high
+
+    tree_limits(tree, 0)
+    if not changed:
+        return False
+    for names, entries, limits, low, high in plans:
+        if entries is not None:
+            for index, (key, spec) in enumerate(entries):
+                mupdf.pdf_array_put(names, index * 2, key)
+                mupdf.pdf_array_put(names, index * 2 + 1, spec)
+        if mupdf.pdf_is_array(limits):
+            mupdf.pdf_array_put(limits, 0, low)
+            mupdf.pdf_array_put(limits, 1, high)
+    return True
+
+
+def _pdf_write_attachment_payload(mupdf, stream, staged: Path, limit: int) -> int | None:
+    source = mupdf.pdf_open_stream(stream)
+    buffer = bytearray(min(limit + 1, 1024 * 1024))
+    pointer = mupdf.python_mutable_buffer_data(buffer)
+    size = 0
+    with staged.open("wb") as target:
+        while size <= limit:
+            count = mupdf.fz_read(source, pointer, min(len(buffer), limit - size + 1))
+            if not count:
+                return size
+            size += count
+            if size > limit:
+                return None
+            target.write(memoryview(buffer)[:count])
+    return None
+
+
+def _pdf_update_attachment_stream(pymupdf, document, pdf, stream, payload: bytes):
+    mupdf = pymupdf.mupdf
+    original = mupdf.pdf_to_num(stream)
+    xref = document.get_new_xref()
+    document.update_object(xref, document.xref_object(original, compressed=True))
+    document.update_stream(xref, payload, compress=True)
+    modified = mupdf.pdf_load_object(pdf, xref)
+    params = mupdf.pdf_dict_gets(modified, "Params")
+    params = mupdf.pdf_copy_dict(params) if mupdf.pdf_is_dict(params) else mupdf.pdf_new_dict(pdf, 2)
+    mupdf.pdf_dict_puts(params, "Size", mupdf.pdf_new_int(len(payload)))
+    mupdf.pdf_dict_puts(modified, "Params", params)
+    if not mupdf.pdf_is_null(mupdf.pdf_dict_gets(modified, "DL")):
+        document.xref_set_key(xref, "DL", str(len(payload)))
+    if not mupdf.pdf_is_null(mupdf.pdf_dict_gets(params, "CheckSum")):
+        checksum = hashlib.md5(payload, usedforsecurity=False).hexdigest()
+        document.xref_set_key(xref, "Params/CheckSum", f"<{checksum}>")
+    return mupdf.pdf_new_indirect(pdf, xref, 0)
+
+
+def _pdf_transform_attachment_payloads(pymupdf, document, pdf, streams, scratch: Path, transform: AttachmentTransform) -> bool:
+    mupdf = pymupdf.mupdf
+    changed = False
+    bytes_read = 0
+    bytes_written = 0
+    if not streams:
+        return False
+    with tempfile.TemporaryDirectory(prefix=".machina-pdf-", dir=scratch) as area:
+        directory = Path(area)
+        for entries in streams.values():
+            stream = entries[0][0]
+            names = [name for _, _, _, name, protected in entries if name and not protected]
+            if not names or any(protected for _, _, _, _, protected in entries):
+                continue
+            suffixes = {"".join(PurePosixPath(name).suffixes).casefold() for name in names}
+            if len(suffixes) != 1:
+                continue
+            suffix = suffixes.pop()
+            if not re.fullmatch(r"[.a-zA-Z0-9_-]{1,80}", suffix):
+                continue
+            if mupdf.pdf_to_name(mupdf.pdf_dict_gets(stream, "Type")) not in {"", "EmbeddedFile"}:
+                continue
+            if not mupdf.pdf_is_null(mupdf.pdf_dict_gets(stream, "F")):
+                continue  # The stream may be backed by an external file.
+            limit = min(_PDF_ATTACHMENT_LIMIT, _PDF_ATTACHMENT_TOTAL - bytes_read)
+            output_limit = min(_PDF_ATTACHMENT_LIMIT, _PDF_ATTACHMENT_TOTAL - bytes_written)
+            if min(limit, output_limit) <= 0:
+                break
+            source = directory / ("attachment" + suffix)
+            destination = directory / ("rewritten" + suffix)
+            size = _pdf_write_attachment_payload(mupdf, stream, source, limit)
+            bytes_read += size if size is not None else limit
+            if size is None:
+                continue
+            destination.unlink(missing_ok=True)
+            transformed = transform(names[0], source, destination)
+            if not isinstance(transformed, bool):
+                raise ValueError("PDF attachment transform must return a Boolean")
+            if not transformed:
+                continue
+            if destination.is_symlink() or not destination.is_file():
+                raise ValueError("PDF attachment transform did not write a regular file")
+            with destination.open("rb") as output:
+                payload = output.read(output_limit + 1)
+            if len(payload) > output_limit:
+                raise ValueError("PDF attachment output exceeds the supported size")
+            if payload == source.read_bytes():
+                continue
+            reference = _pdf_update_attachment_stream(pymupdf, document, pdf, stream, payload)
+            for _, files, key, _, _ in entries:
+                mupdf.pdf_dict_puts(files, key, reference)
+            bytes_written += len(payload)
+            changed = True
+    return changed
+
+
+def _pdf_rewrite_attachments(pymupdf, document, replace: Replacement, scratch: Path, transform: AttachmentTransform | None) -> bool:
+    mupdf = pymupdf.mupdf
+    pdf = pymupdf._as_pdf_document(document)
+    catalog = mupdf.pdf_new_indirect(pdf, document.pdf_catalog(), 0)
+    tree = mupdf.pdf_dict_getp(catalog, "Names/EmbeddedFiles")
+    lock_names = not mupdf.pdf_is_null(mupdf.pdf_dict_gets(catalog, "Collection"))
+    specs = []
+    streams = defaultdict(list)
+    for obj in _pdf_objects(mupdf, catalog):
+        action = mupdf.pdf_to_name(mupdf.pdf_dict_gets(obj, "S"))
+        uri = _pdf_string(mupdf, obj, "URI")
+        lock_names |= action in {"GoToE", "JavaScript"} or "#ef=" in uri.casefold()
+        files = mupdf.pdf_dict_gets(obj, "EF")
+        if not mupdf.pdf_is_dict(files):
+            continue
+        spec_streams = []
+        protected = mupdf.pdf_to_name(mupdf.pdf_dict_gets(obj, "AFRelationship")) in _PDF_PROTECTED_ATTACHMENTS
+        protected |= not mupdf.pdf_is_null(mupdf.pdf_dict_gets(obj, "RF"))
+        fallback = next((value for key in _PDF_FILE_NAMES if (value := _pdf_string(mupdf, obj, key))), "")
+        for key in _PDF_FILE_NAMES:
+            stream = mupdf.pdf_dict_gets(files, key)
+            if mupdf.pdf_to_num(stream) and mupdf.pdf_is_stream(stream):
+                name = _attachment_basename(_pdf_string(mupdf, obj, key) or fallback)
+                spec_streams.append((stream, files, key, name, protected))
+        if spec_streams:
+            specs.append((obj, protected))
+            lock_names |= protected
+            for entry in spec_streams:
+                streams[mupdf.pdf_to_num(entry[0])].append(entry)
+
+    changed = False
+    if specs and not lock_names:
+        name_updates = []
+        original_names = defaultdict(set)
+        for spec, _ in specs:
+            for key in _PDF_FILE_NAMES:
+                before = _pdf_string(mupdf, spec, key)
+                after = _renamed_attachment(before, replace)
+                if before:
+                    original_names[after.casefold()].add(before.casefold())
+                if before != after:
+                    name_updates.append((spec, key, after))
+        lock_names = any(len(names) > 1 for names in original_names.values())
+        if not lock_names and not mupdf.pdf_is_null(tree):
+            try:
+                changed |= _pdf_rename_attachment_keys(mupdf, tree, replace)
+            except ValueError:
+                lock_names = True  # Keep file specs and name-tree keys in sync.
+        if not lock_names:
+            for spec, key, value in name_updates:
+                mupdf.pdf_dict_puts(spec, key, mupdf.pdf_new_text_string(value))
+                changed = True
+
+    for spec, protected in specs:
+        if not protected:
+            before = _pdf_string(mupdf, spec, "Desc")
+            after = replace(before) if before else before
+            if before != after:
+                mupdf.pdf_dict_puts(spec, "Desc", mupdf.pdf_new_text_string(after))
+                changed = True
+    if transform is not None:
+        changed |= _pdf_transform_attachment_payloads(pymupdf, document, pdf, streams, scratch, transform)
+    return changed
+
+
+def _rewrite_pdf(
+    source: Path, destination: Path, replace: Replacement, attachment_transform: AttachmentTransform | None = None
+) -> bool:
     try:
         import pymupdf
     except ImportError as error:
@@ -407,6 +690,8 @@ def _rewrite_pdf(source: Path, destination: Path, replace: Replacement) -> bool:
             if updated_xml != xml:
                 document.set_xml_metadata(updated_xml)
                 changed = True
+
+        changed |= _pdf_rewrite_attachments(pymupdf, document, replace, destination.parent, attachment_transform)
 
         for page in document:
             changed |= _pdf_rewrite_page(pymupdf, page, replace)

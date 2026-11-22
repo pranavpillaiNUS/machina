@@ -26,6 +26,11 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--rename-paths", action="store_true", help="apply planned path renames")
     run.add_argument("--preserve-on-error", action="store_true", help="copy adapter failures for review")
     run.add_argument("--edit-dwg", action="store_true", help="rewrite DWG through ODA File Converter")
+    prepare = commands.add_parser("prepare", help="package a local submission")
+    prepare.add_argument("attempt", type=Path)
+    prepare.add_argument("--report", type=Path, required=True, help="aggregate report from run")
+    prepare.add_argument("--repo", type=Path, default=Path("."), help="pipeline Git checkout")
+    prepare.add_argument("--revision", default="HEAD", help="source commit or ref used for the run")
     args = parser.parse_args(argv)
     try:
         if args.command == "inventory":
@@ -35,6 +40,10 @@ def main(argv: list[str] | None = None) -> int:
             from .candidates import discover_candidates
 
             result = discover_candidates(args.input, args.private_output)
+        elif args.command == "prepare":
+            from .attempt import prepare_attempt
+
+            result = prepare_attempt(args.attempt, args.repo, args.report, revision=args.revision)
         else:
             from .pipeline import RunOptions, rewrite_corpus
             from .policy import Rulebook

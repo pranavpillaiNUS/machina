@@ -17,6 +17,13 @@ from .corpus import filesystem_path, scan
 from .discovery import classify_suffix
 from .dxf import dxf_encoding, header_values, read_records
 from .formats import _step_decode
+from .solidworks import (
+    SUPPORTED_SUFFIXES as SOLIDWORKS_SUFFIXES,
+    SolidWorksError,
+    SolidWorksUnavailable,
+    is_modern_solidworks,
+    read_identity_metadata,
+)
 from .oda import DWG_VERSIONS, convert, converter_command, dwg_version
 
 
@@ -85,10 +92,23 @@ def discover_candidates(input_root: Path, private_output: Path) -> dict[str, obj
     with messages:
         for entry in scan(root):
             suffix = entry.relative.suffix.lower()
-            if suffix not in _STEP_SUFFIXES and suffix not in {".pdf", ".dxf", ".dwg"}:
+            if suffix not in _STEP_SUFFIXES | SOLIDWORKS_SUFFIXES | {".pdf", ".dxf", ".dwg"}:
                 continue
             source = root.joinpath(*entry.relative.parts)
-            if suffix in {".dxf", ".dwg"}:
+            if suffix in SOLIDWORKS_SUFFIXES:
+                try:
+                    if entry.size > 64 * 1024**2 or not is_modern_solidworks(source):
+                        skipped["solidworks_container_unavailable"] += 1
+                        continue
+                    metadata = read_identity_metadata(source)
+                except SolidWorksUnavailable:
+                    skipped["solidworks_adapter_unavailable"] += 1
+                    continue
+                except (OSError, SolidWorksError):
+                    skipped["solidworks_metadata_unavailable"] += 1
+                    continue
+                inspected["solidworks"] += 1
+            elif suffix in {".dxf", ".dwg"}:
                 if suffix == ".dwg" and converter is None:
                     skipped["dwg_converter_unavailable"] += 1
                     continue
