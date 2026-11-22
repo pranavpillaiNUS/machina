@@ -15,8 +15,13 @@ from .corpus import CorpusFile, filesystem_path, scan
 from .discovery import classify_suffix
 from .formats import SUPPORTED_SUFFIXES as CAD_SUFFIXES
 from .formats import rewrite_file
+from .freecad import SUPPORTED_SUFFIXES as FREECAD_SUFFIXES
+from .freecad import rewrite_freecad
 from .geometry_text import SUPPORTED_SUFFIXES as GEOMETRY_SUFFIXES
 from .geometry_text import rewrite_geometry_text
+from .native_cfb import CFB_SIGNATURE
+from .native_cfb import SUPPORTED_SUFFIXES as CFB_SUFFIXES
+from .native_cfb import rewrite_native_cfb
 from .policy import PathMap, Rulebook
 from .svg import SUPPORTED_SUFFIXES as SVG_SUFFIXES
 from .svg import rewrite_svg
@@ -26,11 +31,20 @@ ADAPTERS = {
     suffix: adapter
     for suffixes, adapter in (
         (CAD_SUFFIXES, rewrite_file),
+        (FREECAD_SUFFIXES, rewrite_freecad),
         (GEOMETRY_SUFFIXES, rewrite_geometry_text),
         (SVG_SUFFIXES, rewrite_svg),
     )
     for suffix in suffixes
 }
+
+
+def _select_adapter(source: Path, suffix: str):
+    if suffix in CFB_SUFFIXES:
+        with source.open("rb") as stream:
+            if stream.read(len(CFB_SIGNATURE)) == CFB_SIGNATURE:
+                return rewrite_native_cfb
+    return ADAPTERS.get(suffix)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +100,7 @@ def _rewrite_one(
     target.parent.mkdir(parents=True, exist_ok=True)
     suffix = classify_suffix(file.relative.name)
     archive = archive_suffix(file.relative.name)
-    adapter = ADAPTERS.get(suffix)
+    adapter = _select_adapter(source, suffix)
     archive_members: Counter[str] = Counter()
     if file.size == 0:
         status = "empty"
@@ -130,7 +144,7 @@ def _rewrite_embedded(
 
         def transform(name: str, original: Path, replacement: Path) -> bool:
             size = original.stat().st_size
-            adapter = ADAPTERS.get(classify_suffix(name))
+            adapter = _select_adapter(original, classify_suffix(name))
             if size == 0:
                 counts["empty"] += 1
                 return False
@@ -225,13 +239,14 @@ def rewrite_corpus(
             raise ValueError("Output was created during the run. Choose a new output directory.")
         staging.rename(output_root)
 
+    edit_mib, remainder = divmod(options.max_edit_bytes, 1024**2)
     return {
         "files": len(files),
         "output_bytes": size,
         "renamed": renamed,
         "run_options": {
             "workers": options.workers,
-            "max_edit_mib": options.max_edit_bytes / 1024**2,
+            "max_edit_mib": edit_mib if not remainder else options.max_edit_bytes / 1024**2,
             "rename_paths": options.rename_paths,
             "preserve_on_error": options.preserve_on_error,
         },
