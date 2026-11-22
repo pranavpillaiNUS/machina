@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from machina_deid.dwg import rewrite_dwg
+from machina_deid.oda import operator_login
 
 FAKE = Path(__file__).with_name("fake_oda.py").resolve()
 FAKE_COMMAND = f"{shlex.quote(sys.executable)} {shlex.quote(str(FAKE))}"
@@ -75,7 +76,7 @@ class DwgTests(unittest.TestCase):
             self.run_adapter(fake_dwg(version=b"AC1009"))
 
     def test_converter_login_stamp_is_rejected(self):
-        with mock.patch.dict(os.environ, {"FAKE_ODA_STAMP": "1"}):
+        with mock.patch.dict(os.environ, {"FAKE_ODA_STAMP": operator_login()}):
             with self.assertRaisesRegex(ValueError, "local login"):
                 self.run_adapter(fake_dwg())
 

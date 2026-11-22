@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import os
 import shlex
 import shutil
@@ -61,6 +62,15 @@ def _child_environment() -> dict[str, str]:
     return environment
 
 
+def operator_login() -> str:
+    """Identify the login ODA may stamp into its output."""
+    if os.name == "nt":
+        return getpass.getuser()
+    import pwd
+
+    return pwd.getpwuid(os.getuid()).pw_name
+
+
 def convert(
     source: Path,
     output_dir: Path,
@@ -79,17 +89,24 @@ def convert(
     with tempfile.TemporaryDirectory(prefix="oda-in-") as staging:
         # Only a neutral name reaches the converter.
         shutil.copyfile(source, Path(staging, "drawing" + source.suffix.lower()))
+        if os.name == "nt":
+            process_options = {"creationflags": subprocess.CREATE_NO_WINDOW}
+        else:
+            process_options = {"start_new_session": True}
         process = subprocess.Popen(
             [*command, staging, str(target), version, kind, "0", "1", "*.*"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
             env=_child_environment(),
+            **process_options,
         )
         try:
             returncode = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
+            if os.name == "nt":
+                process.kill()
+            else:
+                os.killpg(process.pid, signal.SIGKILL)
             process.wait()
             raise ValueError("DWG conversion timed out") from None
     outputs = [

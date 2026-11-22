@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import os
-import pwd
 import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from .dxf import Replacement, drawing_shape, header_values, read_records, rewrite_dxf_bytes
-from .oda import DWG_VERSIONS, convert, converter_command, dwg_version
+from .oda import DWG_VERSIONS, convert, converter_command, dwg_version, operator_login
 
 SUPPORTED_SUFFIXES = frozenset({".dwg"})
 
@@ -45,7 +43,7 @@ def rewrite_dwg(source: Path, destination: Path, replace: Replacement) -> bool:
         if rewrite_dxf_bytes(check, replace, strip_thumbnail=False) != check:
             raise ValueError("DWG still contains replaceable text")
         saved_by = dict(header_values(check_records)).get("$LASTSAVEDBY")
-        if saved_by == pwd.getpwuid(os.getuid()).pw_name.encode():
+        if saved_by == operator_login().encode():
             raise ValueError("DWG output carries the local login name; run the converter under a neutral account")
         shutil.copyfile(output, destination)
     return True

@@ -46,6 +46,7 @@ class OdaTests(unittest.TestCase):
         stub.chmod(0o755)
         return str(bin_dir)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires a Linux PATH and X display")
     def test_path_binary_with_only_a_visible_display_is_refused(self):
         environment = {"MACHINA_ODA_CONVERTER": "", "MACHINA_ODA_DISPLAY": "", "PATH": self.stub_on_path(), "DISPLAY": ":0"}
         with mock.patch.dict(os.environ, environment):
@@ -53,6 +54,7 @@ class OdaTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "hidden display"):
                 convert(self.drawing(), self.folder, "ACAD2018", "DXF")
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires a Linux PATH and X display")
     def test_hidden_display_reaches_the_converter(self):
         environment = {
             "MACHINA_ODA_CONVERTER": "", "MACHINA_ODA_DISPLAY": ":97", "PATH": self.stub_on_path(),

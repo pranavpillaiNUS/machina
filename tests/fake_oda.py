@@ -1,7 +1,6 @@
 """Stand-in for ODAFileConverter: a fake DWG is b"<AC code>\\n" followed by DXF text."""
 
 import os
-import pwd
 import re
 import sys
 import time
@@ -28,10 +27,9 @@ def main(source_dir, target_dir, version, kind, _recurse, _audit, _pattern="*.*"
         if os.environ.get("FAKE_ODA_MUTATE") and kind == "DWG" and b"NOVA" in payload:
             # Imitate a round trip that loses data only when edited content is written.
             payload = payload.replace(b" 10\n1.0\n", b" 10\n999.0\n")
-        if os.environ.get("FAKE_ODA_STAMP"):
+        if login := os.environ.get("FAKE_ODA_STAMP"):
             # Imitate ODA: every write records the passwd login as $LASTSAVEDBY.
-            login = pwd.getpwuid(os.getuid()).pw_name.encode()
-            payload = re.sub(rb"(\$LASTSAVEDBY\r?\n *1\r?\n)[^\r\n]*", lambda m: m[1] + login, payload)
+            payload = re.sub(rb"(\$LASTSAVEDBY\r?\n *1\r?\n)[^\r\n]*", lambda m: m[1] + login.encode(), payload)
         Path(target_dir, source.stem + "." + kind.lower()).write_bytes(payload)
     return 0
 
