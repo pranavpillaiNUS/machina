@@ -10,7 +10,13 @@ Use Python 3.11 or newer. Run commands from the repo root.
 python -m machina_deid inventory input
 ```
 
-The inventory reports file counts and sizes by extension without listing original paths. It excludes the organizer's `input/.get-input/` download metadata.
+The inventory reports file counts and sizes by extension, empty files, and case-insensitive path conflicts without listing original paths. It excludes the organizer's `input/.get-input/` download metadata. Inspect the official manifest before downloading the corpus.
+
+```sh
+mkdir -p .local
+curl -fsSL https://machina-input.joinbuilders.org/manifest.tsv -o .local/manifest.tsv
+python -m machina_deid inventory .local/manifest.tsv --manifest
+```
 
 Use a case-sensitive data filesystem with room for the input, output, and archive scratch data. The track recommends at least 400 GB for a cloud VM. The official downloader supports a small first run.
 
