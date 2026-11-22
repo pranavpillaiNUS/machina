@@ -3,6 +3,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from zipfile import ZipFile
 
 from machina_deid.pipeline import RunOptions, rewrite_corpus
 from machina_deid.policy import Rulebook
@@ -73,6 +74,45 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual((corpus / "broken.step").read_bytes(), b"damaged")
             with self.assertRaisesRegex(ValueError, "Output already exists"):
                 rewrite_corpus(source, corpus, RULES)
+
+    def test_archives_use_separate_reference_namespaces_and_report_leaf_coverage(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input"
+            source.mkdir()
+            with ZipFile(source / "drawings.zip", "w") as archive:
+                archive.writestr("bundle/Example Foundry.step", STEP)
+                archive.writestr("bundle/model.ipt", b"opaque native payload")
+
+            corpus = root / "corpus"
+            report = rewrite_corpus(source, corpus, RULES, RunOptions(rename_paths=True))
+
+            self.assertEqual(report["by_status"], {"rewritten": 1})
+            self.assertEqual(report["archive_member_status"], {"rewritten": 1, "unsupported": 1})
+            with ZipFile(corpus / "drawings.zip") as archive:
+                rewritten = archive.read("bundle/Example Foundry.step")
+                self.assertIn(b"'Example Foundry.step'", rewritten)
+                self.assertIn(b"Juniper Works", rewritten)
+                self.assertEqual(archive.read("bundle/model.ipt"), b"opaque native payload")
+                self.assertIsNone(archive.testzip())
+
+    def test_copy_for_review_is_scoped_to_the_failed_archive_member(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input"
+            source.mkdir()
+            with ZipFile(source / "drawings.zip", "w") as archive:
+                archive.writestr("good.step", STEP)
+                archive.writestr("broken.step", b"damaged")
+
+            corpus = root / "corpus"
+            with self.assertRaisesRegex(ValueError, "adapter failed"):
+                rewrite_corpus(source, corpus, RULES)
+            report = rewrite_corpus(source, corpus, RULES, RunOptions(preserve_on_error=True))
+            self.assertEqual(report["archive_member_status"], {"adapter_failed": 1, "rewritten": 1})
+            with ZipFile(corpus / "drawings.zip") as archive:
+                self.assertIn(b"Juniper Works", archive.read("good.step"))
+                self.assertEqual(archive.read("broken.step"), b"damaged")
 
 
 if __name__ == "__main__":

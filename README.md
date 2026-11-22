@@ -63,9 +63,11 @@ The rules file stays local. Start with reviewed aliases and explicit replacement
 
 Rules match whole tokens by default. Set `"match": "literal"` for a reviewed substring and `"scope": "content"` or `"scope": "path"` to limit a rule. Rules without a replacement use `MACHINA_PSEUDONYM_KEY` and an optional `category` to derive a repeatable pseudonym. Keep the key stable and private between runs.
 
-The runner stages a fresh output directory and reports counts by status and extension. It currently edits STEP text fields, label and path fields in ASCII DXF, IGES header metadata, and selectable PDF text and supported metadata. Unsupported, empty, and oversized files are copied and counted. An adapter failure aborts the run by default. Use `--preserve-on-error` on development runs to retain failed inputs for investigation.
+The runner stages a fresh output directory and reports counts by status and extension. It edits STEP text fields, labels and paths in ASCII DXF, IGES header metadata, supported SAT and STL metadata, VRML text and URLs, SVG labels and metadata, and selectable PDF text and supported metadata. Unsupported, empty, and oversized files are copied and counted. An adapter failure aborts the run by default. Use `--preserve-on-error` on development runs to retain failed inputs for investigation.
 
-Path renaming is opt-in with `--rename-paths`. The runner plans the namespace before writing and updates references recognized by the adapters. Review relative and native CAD references before enabling it on a submission. Scanned PDF text, PDF attachments, native CAD properties, logos, and nested archives are outside this milestone.
+ZIP and TAR processing recursively visits supported member files and reports leaf-file outcomes. It preserves member names, validates paths and limits expanded bytes and nesting, and rejects encrypted members and symbolic links. Supported TAR compression includes gzip, bzip2, and xz. Archive comments and ownership fields remain outside the current adapters.
+
+Path renaming is opt-in with `--rename-paths`. The runner plans the namespace before writing and updates references recognized by the adapters. Review relative and native CAD references before enabling it on a submission. Scanned PDF text, PDF attachments, native CAD properties, and logos still need coverage.
 
 ## Research
 
