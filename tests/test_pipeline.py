@@ -16,6 +16,11 @@ STEP = (
     b"FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n"
     b"#1=CARTESIAN_POINT('',(1.0,2.0,3.0));\nENDSEC;\nEND-ISO-10303-21;\n"
 )
+LFS_POINTER = (
+    b"version https://git-lfs.github.com/spec/v1\n"
+    + b"oid sha256:" + b"a" * 64 + b"\n"
+    + b"size 123456\n"
+)
 RULES = Rulebook.from_dict(
     {"rules": [{"source": "Example Foundry", "replacement": "Juniper Works"}]}
 )
@@ -113,6 +118,23 @@ class PipelineTests(unittest.TestCase):
             with ZipFile(corpus / "drawings.zip") as archive:
                 self.assertIn(b"Juniper Works", archive.read("good.step"))
                 self.assertEqual(archive.read("broken.step"), b"damaged")
+
+    def test_preserves_git_lfs_pointers_without_attempting_to_parse_missing_geometry(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input"
+            source.mkdir()
+            (source / "model.step").write_bytes(LFS_POINTER)
+            with ZipFile(source / "models.zip", "w") as archive:
+                archive.writestr("another.step", LFS_POINTER)
+
+            corpus = root / "corpus"
+            report = rewrite_corpus(source, corpus, RULES)
+            self.assertEqual(report["by_status"], {"source_pointer": 1, "unchanged": 1})
+            self.assertEqual(report["archive_member_status"], {"source_pointer": 1})
+            self.assertEqual((corpus / "model.step").read_bytes(), LFS_POINTER)
+            with ZipFile(corpus / "models.zip") as archive:
+                self.assertEqual(archive.read("another.step"), LFS_POINTER)
 
 
 if __name__ == "__main__":

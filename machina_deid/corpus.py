@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import os
 from pathlib import Path, PurePosixPath
+import re
 import stat
 
 
@@ -10,6 +11,36 @@ import stat
 class CorpusFile:
     relative: PurePosixPath
     size: int
+
+
+_LFS_VERSION = {
+    b"version https://git-lfs.github.com/spec/v1",
+    b"version https://hawser.github.com/spec/v1",
+}
+_LFS_LINE = re.compile(rb"([a-z0-9.-]+) ([^\r\n]+)")
+_LFS_OID = re.compile(rb"sha256:[a-f0-9]{64}")
+
+
+def is_lfs_pointer(path: Path, size: int) -> bool:
+    """Recognize a pointer to unavailable Git LFS content without fetching it."""
+    if not 110 <= size < 1024:
+        return False
+    with path.open("rb") as source:
+        raw = source.read(1024)
+    lines = raw.split(b"\n")
+    if lines[0] not in _LFS_VERSION or lines[-1] != b"":
+        return False
+    fields = {}
+    for line in lines[1:-1]:
+        match = _LFS_LINE.fullmatch(line)
+        if match is None or match[1] in fields:
+            return False
+        fields[match[1]] = match[2]
+    return bool(
+        b"version" not in fields
+        and _LFS_OID.fullmatch(fields.get(b"oid", b""))
+        and fields.get(b"size", b"").isdigit()
+    )
 
 
 def filesystem_path(path: Path) -> Path:

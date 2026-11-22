@@ -11,7 +11,7 @@ import shutil
 from tempfile import TemporaryDirectory
 
 from .archives import ArchiveLimits, MemberTransform, archive_suffix, rewrite_archive
-from .corpus import CorpusFile, filesystem_path, scan
+from .corpus import CorpusFile, filesystem_path, is_lfs_pointer, scan
 from .discovery import classify_suffix
 from .formats import SUPPORTED_SUFFIXES as CAD_SUFFIXES
 from .formats import rewrite_file
@@ -104,6 +104,8 @@ def _rewrite_one(
     archive_members: Counter[str] = Counter()
     if file.size == 0:
         status = "empty"
+    elif is_lfs_pointer(source, file.size):
+        status = "source_pointer"
     elif not (adapter or archive):
         status = "unsupported"
     elif file.size > (ArchiveLimits().max_member_bytes if archive else options.max_edit_bytes):
@@ -147,6 +149,9 @@ def _rewrite_embedded(
             adapter = _select_adapter(original, classify_suffix(name))
             if size == 0:
                 counts["empty"] += 1
+                return False
+            if is_lfs_pointer(original, size):
+                counts["source_pointer"] += 1
                 return False
             if adapter is None or size > options.max_edit_bytes:
                 counts["unsupported" if adapter is None else "over_limit"] += 1
