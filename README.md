@@ -41,12 +41,13 @@ Keep the raw corpus, original identifiers, private rules, access tokens, and run
 Install the optional PDF dependency when processing PDFs. The pipeline source is MIT. PyMuPDF has its own AGPL and commercial licensing options. [PyMuPDF licensing](https://pymupdf.io/licensing)
 
 ```sh
-python -m pip install -e '.[pdf]'
+python -m pip install -e '.[pdf,native]'
+python -m machina_deid candidates input --private-output private/candidates.json
 python -m machina_deid run input output/dev/corpus --rules private/rules.json
 python -m unittest discover -s tests -v
 ```
 
-The rules file stays local. Start with reviewed aliases and explicit replacements.
+Candidate discovery reads bounded STEP headers and supported PDF document information. It writes exact spellings and evidence counts to the private review file and prints only aggregate counts. Review the candidates before adding approved aliases and replacements to the local rules file.
 
 ```json
 {
@@ -67,7 +68,9 @@ The runner stages a fresh output directory and reports counts by status and exte
 
 ZIP and TAR processing recursively visits supported member files and reports leaf-file outcomes. It preserves member names, validates paths and limits expanded bytes and nesting, and rejects encrypted members and symbolic links. Supported TAR compression includes gzip, bzip2, and xz. Archive comments and ownership fields remain outside the current adapters.
 
-Path renaming is opt-in with `--rename-paths`. The runner plans the namespace before writing and updates references recognized by the adapters. Review relative and native CAD references before enabling it on a submission. Scanned PDF text, PDF attachments, native CAD properties, and logos still need coverage.
+FreeCAD processing edits selected document metadata, supported external links, and referenced TechDraw SVG content. The native CFB adapter edits eligible OLE SummaryInformation and DocumentSummaryInformation properties in recognized SolidWorks and Inventor containers when replacements fit existing allocations. It leaves geometry and other streams intact. Modern SolidWorks containers need a separate adapter. [FreeCAD format documentation](https://github.com/FreeCAD/FreeCAD-documentation/blob/main/wiki/File_Format_FCStd.md), [Microsoft OLE property set specification](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-oleps/)
+
+Path renaming is opt-in with `--rename-paths`. The runner plans the namespace before writing and updates references recognized by the adapters. Review relative and native CAD references before enabling it on a submission. Scanned PDF text, PDF attachments, most native CAD metadata, and logos still need coverage.
 
 ## Research
 

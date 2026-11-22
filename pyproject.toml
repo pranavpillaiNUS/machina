@@ -11,6 +11,7 @@ license = {file = "LICENSE"}
 
 [project.optional-dependencies]
 pdf = ["PyMuPDF==1.26.7"]
+native = ["olefile==0.47"]
 
 [tool.setuptools.packages.find]
 include = ["machina_deid*"]

@@ -14,6 +14,9 @@ def main(argv: list[str] | None = None) -> int:
     inventory = commands.add_parser("inventory", help="summarize the corpus or its manifest")
     inventory.add_argument("input", type=Path)
     inventory.add_argument("--manifest", action="store_true", help="read a mirror TSV manifest")
+    candidates = commands.add_parser("candidates", help="collect private identity candidates")
+    candidates.add_argument("input", type=Path)
+    candidates.add_argument("--private-output", type=Path, required=True)
     run = commands.add_parser("run", help="rewrite a new output corpus")
     run.add_argument("input", type=Path)
     run.add_argument("output", type=Path)
@@ -27,6 +30,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "inventory":
             read_inventory = inventory_manifest if args.manifest else inventory_local
             result = read_inventory(args.input).as_dict()
+        elif args.command == "candidates":
+            from .candidates import discover_candidates
+
+            result = discover_candidates(args.input, args.private_output)
         else:
             from .pipeline import RunOptions, rewrite_corpus
             from .policy import Rulebook
