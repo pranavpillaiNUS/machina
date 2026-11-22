@@ -17,32 +17,15 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from machina_deid.dxf import header_values, read_records, rewrite_dxf_bytes
+from machina_deid.dxf import drawing_shape, header_values, read_records, rewrite_dxf_bytes
 from machina_deid.oda import DWG_VERSIONS, convert, dwg_version
 
 CANARY = "MACHINA-CANARY"
 LOGIN = pwd.getpwuid(os.getuid()).pw_name.encode()
 
 
-def _shape(data: bytes) -> tuple[Counter, dict]:
-    """Object types (CLASS bookkeeping excluded) and drawing handles outside OBJECTS.
-
-    ODA rebuilds some OBJECTS-section dictionaries and XRECORDs with new handles on
-    every write, so only ENTITIES, BLOCKS and TABLES handles are expected to be stable.
-    """
-    records = read_records(data)
-    types = Counter(value for code, value in records if code == 0 and value != b"CLASS")
-    handles, section, record_type = {}, None, b""
-    for code, value in records:
-        if code == 0:
-            record_type = value
-            if value == b"ENDSEC":
-                section = None
-        elif code == 2 and record_type == b"SECTION" and section is None:
-            section = value
-        elif code in (5, 105) and section in (b"ENTITIES", b"BLOCKS", b"TABLES"):
-            handles[value] = record_type
-    return types, handles
+def _shape(data: bytes):
+    return drawing_shape(read_records(data))
 
 
 def _has_thumbnail(data: bytes) -> bool:

@@ -1,9 +1,11 @@
 import io
 import json
+import os
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from machina_deid.candidates import STEP_HEADER_BYTES, discover_candidates
 
@@ -112,6 +114,28 @@ class CandidateDiscoveryTests(unittest.TestCase):
         self.assertIn("Project Blue", raw)
         self.assertNotIn("visible@example.org", raw)
         self.assertNotIn("unrelated@example.org", raw)
+
+
+    def test_dxf_header_people_and_project_become_candidates(self):
+        with TemporaryDirectory() as folder:
+            base = Path(folder)
+            corpus = base / "input"
+            corpus.mkdir()
+            (corpus / "plan.dxf").write_bytes(
+                b"  0\nSECTION\n  2\nHEADER\n  9\n$AUTHOR\n  1\nAna Smith\n  9\n$LASTSAVEDBY\n  1\nasmith\n"
+                b"  9\n$PROJECTNAME\n  1\nBlue Tower\n  0\nENDSEC\n  0\nEOF\n"
+            )
+            (corpus / "plan.dwg").write_bytes(b"AC1032\n")
+            with mock.patch.dict(os.environ, {"MACHINA_ODA_CONVERTER": "", "PATH": ""}):
+                summary = discover_candidates(corpus, base / "review.json")
+            report = json.loads((base / "review.json").read_text(encoding="utf-8"))
+
+        lookup = {(item["kind"], item["source"]): item for item in report["candidates"]}
+        self.assertEqual(lookup["author", "Ana Smith"]["fields"], {"dxf.$AUTHOR": 1})
+        self.assertEqual(lookup["author", "asmith"]["fields"], {"dxf.$LASTSAVEDBY": 1})
+        self.assertIn(("project", "Blue Tower"), lookup)
+        self.assertEqual(summary["inspected"], {"dxf": 1})
+        self.assertEqual(summary["skipped"], {"dwg_converter_unavailable": 1})
 
 
 if __name__ == "__main__":

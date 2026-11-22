@@ -70,6 +70,25 @@ ZIP and TAR processing recursively visits supported member files and reports lea
 
 FreeCAD processing edits selected document metadata, supported external links, and referenced TechDraw SVG content. The native CFB adapter edits eligible OLE SummaryInformation and DocumentSummaryInformation properties in recognized SolidWorks and Inventor containers when replacements fit existing allocations. It leaves geometry and other streams intact. Modern SolidWorks containers need a separate adapter. [FreeCAD format documentation](https://github.com/FreeCAD/FreeCAD-documentation/blob/main/wiki/File_Format_FCStd.md), [Microsoft OLE property set specification](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-oleps/)
 
+### DWG and DXF
+
+ASCII DXF is edited in place by group code. The adapter rewrites visible text (TEXT, MTEXT, ATTRIB, ATTDEF, dimensions, leaders, tables), drawing properties in the header (`$AUTHOR`, `$LASTSAVEDBY`, `$TITLE`, custom properties, `$PROJECTNAME`, `$HYPERLINKBASE` and related fields), XRECORD, FIELD and DICTIONARYVAR strings, extended data, and xref, image and underlay paths. It removes the preview thumbnail. Every edit is checked so that only these string fields change: handles, `$HANDSEED`, numbers, and layer, block and layout names stay as they were. Binary DXF, embedded OLE and VBA payloads, and proxy objects are not edited.
+
+DWG is opt-in with `--edit-dwg` and needs the free [ODA File Converter](https://www.opendesign.com/guestfiles/oda_file_converter). Each file is converted to DXF in its own version, rewritten as above, converted back to DWG in the same version, and checked again. The check covers the version, object-type counts, drawing handles, and the absence of any text a rule would still replace. ODA's terms forbid redistributing the converter, so install it locally and never package it with the corpus or code.
+
+ODA records the login name of the user running it as `$LASTSAVEDBY` on every write, including when it reads a DWG. Run it through `tools/oda-neutral.sh` so that outputs record `machina` instead. The adapter refuses output that carries your login name. Because ODA hides each source's original value, `--edit-dwg` rewrites every DWG. Rewritten DWGs lose the TrustedDWG marker, which AutoCAD reports as a notice.
+
+ODA is a Qt program that needs an X display. Keep its window hidden with `xvfb`, or on hosts without root use `tools/hidden-xvfb.sh`.
+
+```sh
+tools/hidden-xvfb.sh :97
+export ODA_FILE_CONVERTER=/path/to/ODAFileConverter MACHINA_ODA_DISPLAY=:97
+export MACHINA_ODA_CONVERTER="$PWD/tools/oda-neutral.sh"
+python -m machina_deid run input output/dev/corpus --rules private/rules.json --edit-dwg
+```
+
+`docs/autocad-probe.md` records the round-trip measurements behind these choices.
+
 Path renaming is opt-in with `--rename-paths`. The runner plans the namespace before writing and updates references recognized by the adapters. Review relative and native CAD references before enabling it on a submission. Scanned PDF text, PDF attachments, most native CAD metadata, and logos still need coverage.
 
 ## Research

@@ -1,6 +1,8 @@
 """Stand-in for ODAFileConverter: a fake DWG is b"<AC code>\\n" followed by DXF text."""
 
 import os
+import pwd
+import re
 import sys
 import time
 from pathlib import Path
@@ -23,6 +25,10 @@ def main(source_dir, target_dir, version, kind, _recurse, _audit, _pattern="*.*"
             payload = data.split(b"\n", 1)[1]
         else:
             payload = CODES[version].encode("ascii") + b"\n" + data
+        if os.environ.get("FAKE_ODA_STAMP"):
+            # Imitate ODA: every write records the passwd login as $LASTSAVEDBY.
+            login = pwd.getpwuid(os.getuid()).pw_name.encode()
+            payload = re.sub(rb"(\$LASTSAVEDBY\r?\n *1\r?\n)[^\r\n]*", lambda m: m[1] + login, payload)
         Path(target_dir, source.stem + "." + kind.lower()).write_bytes(payload)
     return 0
 

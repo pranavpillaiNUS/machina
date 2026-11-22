@@ -13,7 +13,16 @@ passwd="$(mktemp)"
 trap 'rm -f "$passwd"' EXIT
 awk -F: -v uid="$(id -u)" -v name="$name" 'BEGIN { OFS = ":" } $3 == uid { $1 = name; $5 = name } { print }' /etc/passwd > "$passwd"
 run=(bwrap --dev-bind / / --ro-bind "$passwd" /etc/passwd)
-if [ -z "${DISPLAY:-}" ] && command -v xvfb-run >/dev/null; then
+# The converter is a Qt GUI with only the xcb platform plugin. Keep its window off
+# the desktop: prefer a hidden X server (tools/hidden-xvfb.sh), then xvfb-run.
+if [ -n "${MACHINA_ODA_DISPLAY:-}" ]; then
+  export DISPLAY="$MACHINA_ODA_DISPLAY"
+  unset WAYLAND_DISPLAY
+elif command -v xvfb-run >/dev/null; then
+  unset DISPLAY WAYLAND_DISPLAY
   run+=(xvfb-run -a)
+else
+  echo "oda-neutral: no hidden display; set MACHINA_ODA_DISPLAY (see tools/hidden-xvfb.sh) or install xvfb" >&2
+  exit 3
 fi
 "${run[@]}" "$ODA_FILE_CONVERTER" "$@"

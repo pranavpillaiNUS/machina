@@ -25,6 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--max-edit-mib", type=int, default=64)
     run.add_argument("--rename-paths", action="store_true", help="apply planned path renames")
     run.add_argument("--preserve-on-error", action="store_true", help="copy adapter failures for review")
+    run.add_argument("--edit-dwg", action="store_true", help="rewrite DWG through ODA File Converter")
     args = parser.parse_args(argv)
     try:
         if args.command == "inventory":
@@ -48,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
                     max_edit_bytes=args.max_edit_mib * 1024**2,
                     rename_paths=args.rename_paths,
                     preserve_on_error=args.preserve_on_error,
+                    edit_dwg=args.edit_dwg,
                 ),
             )
         print(json.dumps(result, indent=2))

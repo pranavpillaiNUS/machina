@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import codecs
 import re
+from collections import Counter
 from collections.abc import Callable
 
 Replacement = Callable[[str], str]
@@ -166,6 +167,27 @@ def check_invariants(before: list[DxfRecord], after: list[DxfRecord]) -> None:
     for (old_code, old_value, may_change), (new_code, new_value, _) in zip(old, new):
         if old_code != new_code or (old_value != new_value and not may_change):
             raise ValueError("DXF edit changed a protected field")
+
+
+def drawing_shape(records: list[DxfRecord]) -> tuple[Counter, dict[bytes, bytes]]:
+    """Object types (CLASS excluded) and the handle-to-type map of drawing sections.
+
+    ODA re-handles some OBJECTS-section dictionaries and XRECORDs on every write, so
+    only ENTITIES, BLOCKS and TABLES handles are expected to survive a round trip.
+    """
+    types = Counter(value for code, value in records if code == 0 and value != b"CLASS")
+    handles: dict[bytes, bytes] = {}
+    section, record_type = None, b""
+    for code, value in records:
+        if code == 0:
+            record_type = value
+            if value == b"ENDSEC":
+                section = None
+        elif code == 2 and record_type == b"SECTION" and section is None:
+            section = value
+        elif code in (5, 105) and section in (b"ENTITIES", b"BLOCKS", b"TABLES"):
+            handles[value] = record_type
+    return types, handles
 
 
 def rewrite_dxf_bytes(data: bytes, replace: Replacement, *, strip_thumbnail: bool = True) -> bytes:
