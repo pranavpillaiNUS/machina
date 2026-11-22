@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import codecs
 import difflib
 import hashlib
 import re
@@ -13,6 +12,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cmp_to_key
 from pathlib import Path, PurePosixPath
+
+from .dxf import rewrite_dxf_bytes
+from .dxf import split_lines as _split_lines
 
 Replacement = Callable[[str], str]
 AttachmentTransform = Callable[[str, Path, Path], bool]
@@ -27,17 +29,6 @@ _STEP_ESCAPE = re.compile(
     r"\\X2\\([0-9A-F]+)\\X0\\|\\X4\\([0-9A-F]+)\\X0\\|\\X\\([0-9A-F]{2})|\\(\\)",
     re.IGNORECASE,
 )
-_DXF_VISIBLE_CODES = {
-    b"TEXT": {1},
-    b"ATTRIB": {1},
-    b"ATTDEF": {1, 3},
-    b"DIMENSION": {1},
-    b"MULTILEADER": {304},
-    b"MLEADER": {304},
-    b"TOLERANCE": {1},
-}
-_DXF_PATH_TYPES = {b"BLOCK", b"IMAGEDEF", b"PDFDEFINITION", b"DGNDEFINITION", b"DWFDEFINITION"}
-_DXF_MTEXT_CONTROL = re.compile(r"\\(?:[AaCcFfHhQqSsTtWw][^;]*;|U\+[0-9A-Fa-f]{4}|.)|[{}]")
 _IGES_HOLLERITH = re.compile(rb"([0-9]+)[Hh]")
 _PDF_TOKEN = re.compile(r"\w+|[^\w\s]|\s+")
 _PDF_META_FIELDS = {"title", "author", "subject", "keywords", "creator", "producer"}
@@ -72,7 +63,7 @@ def rewrite_file(
     if suffix in {".stp", ".step"}:
         rewritten = _rewrite_step(original, replace)
     elif suffix == ".dxf":
-        rewritten = _rewrite_dxf(original, replace)
+        rewritten = rewrite_dxf_bytes(original, replace)
     else:
         rewritten = _rewrite_iges(original, replace)
     if rewritten == original:
@@ -139,109 +130,6 @@ def _rewrite_step(data: bytes, replace: Replacement) -> bytes:
         return b"'" + _step_encode(updated) + b"'" if updated != original else token
 
     return _STEP_TOKEN.sub(rewrite_token, data)
-
-
-def _split_lines(data: bytes) -> list[tuple[bytes, bytes]]:
-    """Keep each original line terminator, including a missing final one."""
-    lines = re.split(rb"(\r\n|\n|\r)", data)
-    if len(lines) % 2:
-        lines.append(b"")
-    if lines[-2:] == [b"", b""]:
-        del lines[-2:]
-    return list(zip(lines[::2], lines[1::2]))
-
-
-def _dxf_encoding(records: list[tuple[int, bytes]]) -> str:
-    encoding = "cp1252"
-    for (code, name), (_, value) in zip(records, records[1:]):
-        if code != 9:
-            continue
-        if name == b"$ACADVER" and re.fullmatch(rb"AC\d{4}", value) and value >= b"AC1021":
-            return "utf-8"
-        if name == b"$DWGCODEPAGE":
-            code_page = re.fullmatch(rb"(?:ANSI_|DOS)(\d+)", value)
-            if code_page is not None:
-                try:
-                    encoding = codecs.lookup("cp" + code_page[1].decode("ascii")).name
-                except LookupError:
-                    pass
-    return encoding
-
-
-def _dxf_mtext(value: str, replace: Replacement) -> str:
-    parts = []
-    end = 0
-    for command in _DXF_MTEXT_CONTROL.finditer(value):
-        parts.extend([replace(value[end:command.start()]), command.group()])
-        end = command.end()
-    parts.append(replace(value[end:]))
-    return "".join(parts)
-
-
-def _rewrite_dxf(data: bytes, replace: Replacement) -> bytes:
-    if data.startswith(b"AutoCAD Binary DXF"):
-        raise ValueError("Binary DXF requires a binary-aware adapter")
-    lines = _split_lines(data)
-    if len(lines) % 2:
-        raise ValueError("DXF has an incomplete group code pair")
-    try:
-        codes = [int(line[0].removeprefix(b"\xef\xbb\xbf")) for line in lines[::2]]
-    except ValueError as error:
-        raise ValueError("DXF contains a malformed group code") from error
-    records = [(code, line[0].strip()) for code, line in zip(codes, lines[1::2])]
-    if not records or records[-1] != (0, b"EOF"):
-        raise ValueError("DXF is missing its EOF marker")
-    encoding = _dxf_encoding(records)
-
-    def write_value(index: int, value: bytes) -> None:
-        if b"\n" in value or b"\r" in value or b"\x00" in value:
-            raise ValueError("Replacement contains an invalid DXF line character")
-        line = index * 2 + 1
-        lines[line] = (value, lines[line][1])
-
-    def rewrite_mtext(indices: list[int]) -> None:
-        if not indices:
-            return
-        values = [lines[index * 2 + 1][0] for index in indices]
-        before = b"".join(values).decode(encoding, errors="surrogateescape")
-        after = _dxf_mtext(before, replace)
-        if before == after:
-            return
-        payload = after.encode(encoding, errors="surrogateescape")
-        # Group 3 chunks precede a final group 1. Keep existing group structure.
-        limit = 250 * len(indices)
-        if len(payload) > limit:
-            raise ValueError("DXF MTEXT replacement exceeds the existing chunk capacity")
-        # Preserve all preceding group 3 chunks at their original byte widths.
-        for index, old in zip(indices[:-1], values[:-1]):
-            if len(payload) <= len(old):
-                raise ValueError("DXF MTEXT replacement does not fit the existing chunk structure")
-            chunk, payload = payload[:len(old)], payload[len(old):]
-            write_value(index, chunk)
-        if len(payload) > 250:
-            raise ValueError("DXF MTEXT final group would exceed 250 bytes")
-        write_value(indices[-1], payload)
-
-    record_type = b""
-    mtext_indices = []
-    for index, (code, value) in enumerate(records):
-        if code == 0:
-            rewrite_mtext(mtext_indices)
-            mtext_indices = []
-            record_type = value
-        elif record_type == b"MTEXT" and code in {1, 3}:
-            mtext_indices.append(index)
-        elif code in {999, 1000} or code in _DXF_VISIBLE_CODES.get(record_type, ()) or (
-            code == 1 and record_type in _DXF_PATH_TYPES
-        ):
-            before = lines[index * 2 + 1][0].decode(encoding, errors="surrogateescape")
-            after = _dxf_mtext(before, replace) if record_type in _DXF_VISIBLE_CODES else replace(before)
-            if before != after:
-                updated = after.encode(encoding, errors="surrogateescape")
-                if code == 1000 and len(updated) > 255:
-                    raise ValueError("DXF extended data replacement exceeds 255 bytes")
-                write_value(index, updated)
-    return b"".join(value + ending for value, ending in lines)
 
 
 def _rewrite_iges(data: bytes, replace: Replacement) -> bytes:

@@ -12,6 +12,7 @@ license = {file = "LICENSE"}
 [project.optional-dependencies]
 pdf = ["PyMuPDF==1.26.7"]
 native = ["olefile==0.47"]
+solidworks = ["swformat @ git+https://github.com/KenM76/swformat.git@69b80c860241fdcbfa334f67cb951f76398c1a71"]
 
 [tool.setuptools.packages.find]
 include = ["machina_deid*"]

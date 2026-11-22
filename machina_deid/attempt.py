@@ -21,7 +21,12 @@ MAX_CORPUS_FILES = 400_000
 SCORER_FILE_BYTES = 2_000_000_000
 _SNAPSHOT_DIRECTORIES = {"machina_deid", "tests"}
 _SNAPSHOT_FILES = {"LICENSE", "README.md", "pyproject.toml"}
-_SNAPSHOT_HELPERS = {"tools/hidden-xvfb.sh", "tools/oda-neutral.sh", "tools/oda_probe.py"}
+_SNAPSHOT_OPTIONAL_FILES = {
+    "docs/autocad-probe.md",
+    "tools/hidden-xvfb.sh",
+    "tools/oda-neutral.sh",
+    "tools/oda_probe.py",
+}
 _HASH = re.compile(rb"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 _CODE_COMPONENT = re.compile(r"[A-Za-z0-9_.-]+\Z")
 _PRIVATE_COMPONENTS = {".local", ".venv", "aliases", "credentials", "input", "logs", "output", "private", "raw"}
@@ -235,7 +240,7 @@ def _commit(repo: Path, revision: str) -> str:
 
 
 def _snapshot_entries(repo: Path, commit: str) -> list[tuple[PurePosixPath, str, bool]]:
-    roots = sorted(_SNAPSHOT_DIRECTORIES | _SNAPSHOT_FILES | _SNAPSHOT_HELPERS)
+    roots = sorted(_SNAPSHOT_DIRECTORIES | _SNAPSHOT_FILES | _SNAPSHOT_OPTIONAL_FILES)
     records = _git(repo, "ls-tree", "--full-tree", "-rz", commit, "--", *roots)
     result = []
     tracked_roots = set()
@@ -263,7 +268,7 @@ def _snapshot_entries(repo: Path, commit: str) -> list[tuple[PurePosixPath, str,
 
 
 def _safe_code_path(path: PurePosixPath) -> bool:
-    if path.as_posix() in _SNAPSHOT_HELPERS:
+    if path.as_posix() in _SNAPSHOT_OPTIONAL_FILES:
         return True
     if len(path.parts) == 1:
         return path.name in _SNAPSHOT_FILES

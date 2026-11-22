@@ -13,6 +13,9 @@ from tempfile import TemporaryDirectory
 from .archives import ArchiveLimits, MemberTransform, archive_suffix, rewrite_archive
 from .corpus import CorpusFile, filesystem_path, is_lfs_pointer, scan
 from .discovery import classify_suffix
+from .dwg import SUPPORTED_SUFFIXES as DWG_SUFFIXES
+from .dwg import rewrite_dwg
+from .oda import converter_command
 from .formats import SUPPORTED_SUFFIXES as CAD_SUFFIXES
 from .formats import rewrite_file
 from .freecad import SUPPORTED_SUFFIXES as FREECAD_SUFFIXES
@@ -23,6 +26,13 @@ from .native_cfb import CFB_SIGNATURE
 from .native_cfb import SUPPORTED_SUFFIXES as CFB_SUFFIXES
 from .native_cfb import rewrite_native_cfb
 from .policy import PathMap, Rulebook
+from .solidworks import (
+    SUPPORTED_SUFFIXES as SOLIDWORKS_SUFFIXES,
+    SolidWorksUnavailable,
+    SolidWorksUnsupported,
+    is_modern_solidworks,
+    rewrite_solidworks,
+)
 from .svg import SUPPORTED_SUFFIXES as SVG_SUFFIXES
 from .svg import rewrite_svg
 
@@ -39,12 +49,39 @@ ADAPTERS = {
 }
 
 
-def _select_adapter(source: Path, suffix: str):
+def _select_adapter(source: Path, suffix: str, *, edit_dwg: bool):
+    if suffix in DWG_SUFFIXES:
+        return rewrite_dwg if edit_dwg else None
     if suffix in CFB_SUFFIXES:
         with source.open("rb") as stream:
             if stream.read(len(CFB_SIGNATURE)) == CFB_SIGNATURE:
                 return rewrite_native_cfb
+    if suffix in SOLIDWORKS_SUFFIXES and is_modern_solidworks(source):
+        return rewrite_solidworks
     return ADAPTERS.get(suffix)
+
+
+def _apply_adapter(adapter, source: Path, target: Path, replace, options: "RunOptions") -> bool:
+    if source.suffix.casefold() != ".pdf":
+        return adapter(source, target, replace)
+
+    def transform_attachment(name: str, original: Path, replacement: Path) -> bool:
+        suffix = classify_suffix(name)
+        if suffix == ".pdf" or original.stat().st_size > options.max_edit_bytes:
+            return False
+        attached_adapter = _select_adapter(original, suffix, edit_dwg=options.edit_dwg)
+        if attached_adapter is None or is_lfs_pointer(original, original.stat().st_size):
+            return False
+        try:
+            return attached_adapter(original, replacement, replace)
+        except (SolidWorksUnavailable, SolidWorksUnsupported):
+            return False
+        except Exception:
+            if not options.preserve_on_error:
+                raise
+            return False
+
+    return adapter(source, target, replace, attachment_transform=transform_attachment)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +90,7 @@ class RunOptions:
     max_edit_bytes: int = 64 * 1024**2
     rename_paths: bool = False
     preserve_on_error: bool = False
+    edit_dwg: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +138,7 @@ def _rewrite_one(
     target.parent.mkdir(parents=True, exist_ok=True)
     suffix = classify_suffix(file.relative.name)
     archive = archive_suffix(file.relative.name)
-    adapter = _select_adapter(source, suffix)
+    adapter = _select_adapter(source, suffix, edit_dwg=options.edit_dwg)
     archive_members: Counter[str] = Counter()
     if file.size == 0:
         status = "empty"
@@ -116,7 +154,9 @@ def _rewrite_one(
             if archive:
                 changed = _rewrite_embedded(source, target, rulebook, options, archive_members)
             else:
-                changed = adapter(source, target, replace)
+                changed = _apply_adapter(adapter, source, target, replace, options)
+        except (SolidWorksUnavailable, SolidWorksUnsupported):
+            status = "unsupported"
         except Exception as error:
             if not options.preserve_on_error:
                 raise ValueError(
@@ -146,7 +186,7 @@ def _rewrite_embedded(
 
         def transform(name: str, original: Path, replacement: Path) -> bool:
             size = original.stat().st_size
-            adapter = _select_adapter(original, classify_suffix(name))
+            adapter = _select_adapter(original, classify_suffix(name), edit_dwg=options.edit_dwg)
             if size == 0:
                 counts["empty"] += 1
                 return False
@@ -158,7 +198,10 @@ def _rewrite_embedded(
                 return False
             replace = partial(paths.replace, source_path=PurePosixPath(name))
             try:
-                changed = adapter(original, replacement, replace)
+                changed = _apply_adapter(adapter, original, replacement, replace, options)
+            except (SolidWorksUnavailable, SolidWorksUnsupported):
+                counts["unsupported"] += 1
+                return False
             except Exception:
                 if not options.preserve_on_error:
                     raise
@@ -194,6 +237,8 @@ def rewrite_corpus(
         raise ValueError("Input and output directories must be disjoint.")
     if output_root.exists():
         raise ValueError("Output already exists. Choose a new output directory.")
+    if options.edit_dwg and converter_command() is None:
+        raise ValueError("DWG editing needs ODA File Converter with a hidden display")
 
     input_root = filesystem_path(input_root)
     output_root = filesystem_path(output_root)
@@ -254,6 +299,7 @@ def rewrite_corpus(
             "max_edit_mib": edit_mib if not remainder else options.max_edit_bytes / 1024**2,
             "rename_paths": options.rename_paths,
             "preserve_on_error": options.preserve_on_error,
+            "edit_dwg": options.edit_dwg,
         },
         "by_status": dict(sorted(statuses.items())),
         "archive_member_status": dict(sorted(archive_members.items())),

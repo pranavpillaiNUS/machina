@@ -1,12 +1,15 @@
 """Integration checks for staged corpus processing."""
 
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest import mock
 from zipfile import ZipFile
 
 from machina_deid.pipeline import RunOptions, rewrite_corpus
 from machina_deid.policy import Rulebook
+from tests.test_dwg import FAKE_COMMAND, fake_dwg
 
 
 STEP = (
@@ -27,6 +30,37 @@ RULES = Rulebook.from_dict(
 
 
 class PipelineTests(unittest.TestCase):
+    def test_dwg_is_rewritten_only_with_edit_dwg_and_xref_follows_rename(self):
+        with TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"MACHINA_ODA_CONVERTER": FAKE_COMMAND}):
+            root = Path(directory)
+            source = root / "input"
+            source.mkdir()
+            host = fake_dwg(text=b"Example Foundry", xref=b"Example Foundry.dwg")
+            (source / "host.dwg").write_bytes(host)
+            (source / "Example Foundry.dwg").write_bytes(fake_dwg(text=b"plain"))
+
+            untouched = rewrite_corpus(source, root / "plain", RULES)
+            self.assertEqual(untouched["by_status"], {"unsupported": 2})
+            self.assertEqual((root / "plain" / "host.dwg").read_bytes(), host)
+
+            corpus = root / "edited"
+            report = rewrite_corpus(source, corpus, RULES, RunOptions(edit_dwg=True, rename_paths=True))
+            self.assertEqual(report["by_status"], {"rewritten": 2})
+            self.assertTrue(report["run_options"]["edit_dwg"])
+            output = (corpus / "host.dwg").read_bytes()
+            self.assertIn(b"  1\nJuniper Works.dwg\n", output)
+            self.assertIn(b"  1\nJuniper Works\n", output)
+            self.assertTrue((corpus / "Juniper Works.dwg").exists())
+
+    def test_edit_dwg_without_converter_fails_before_staging(self):
+        with TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"MACHINA_ODA_CONVERTER": "", "PATH": ""}):
+            root = Path(directory)
+            (root / "input").mkdir()
+            (root / "input" / "a.dwg").write_bytes(fake_dwg())
+            with self.assertRaisesRegex(ValueError, "needs ODA File Converter"):
+                rewrite_corpus(root / "input", root / "out", RULES, RunOptions(edit_dwg=True))
+            self.assertEqual(sorted(path.name for path in root.iterdir()), ["input"])
+
     def test_rewrites_content_and_preserves_geometry_and_paths_by_default(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
